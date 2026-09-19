@@ -1825,6 +1825,18 @@ fn parse_pi_session_jsonl(file_path: &std::path::Path, tool: &str) -> Option<Sav
             }
         }
 
+        // `/name <text>` appends `{type:"session_info", name}`. Same reading as
+        // Pi's own session list: the last row wins, and a blank name clears it.
+        if row_type == "session_info" {
+            native_title = value
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            continue;
+        }
+
         // Header: pull id (resume token) + cwd straight off line 1.
         if row_type == "session" {
             created_at = value

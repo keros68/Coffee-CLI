@@ -68,6 +68,25 @@ fn omp_history_preserves_identity_titles_and_counts_only_messages() {
 }
 
 #[test]
+fn pi_session_name_beats_first_prompt() {
+    let path = temp_jsonl("pi-named");
+    write_jsonl(&path, &[
+        r#"{"type":"session","id":"01900000-0000-7000-8000-0000000000aa","cwd":"D:\\project","timestamp":"2026-09-08T00:00:00Z"}"#,
+        r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"why is the session list messy"}]}}"#,
+        r#"{"type":"session_info","name":"  History | readable titles  "}"#,
+    ]);
+    let session = cold_parse(&path, "pi").unwrap();
+    assert_eq!(session.name, "History | readable titles");
+    assert_eq!(session.turn_count, Some(1), "a name row is not a message");
+    // `/name` again renames; a blank name clears it back to the first prompt.
+    append_lines(&path, &[r#"{"type":"session_info","name":"Renamed"}"#]);
+    assert_eq!(cold_parse(&path, "pi").unwrap().name, "Renamed");
+    append_lines(&path, &[r#"{"type":"session_info","name":""}"#]);
+    assert_eq!(cold_parse(&path, "pi").unwrap().name, "why is the session list messy");
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn omp_metadata_only_session_has_no_history_or_activity() {
     let path = temp_jsonl("omp-empty");
     write_jsonl(&path, &[r#"{"type":"session","id":"empty","cwd":"/project"}"#]);
