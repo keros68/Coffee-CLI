@@ -1416,6 +1416,9 @@ fn parse_agent_jsonl(
     // (`/rename`). The last row of each kind wins.
     let mut custom_title = String::new();
     let mut ai_title = String::new();
+    // Headless-run detection, see `is_headless_claude_run`.
+    let mut sdk_entrypoint = false;
+    let mut human_prompt = false;
     let mut total_messages = 0;
     // Count of REAL user messages — ones that are not IDE/system injections
     // (compaction prompt, AGENTS.md, environment_context, etc.). A session
@@ -1435,6 +1438,12 @@ fn parse_agent_jsonl(
             }
             if let Some(c) = value.get("cwd").and_then(|v| v.as_str()) {
                 if cwd.is_empty() && !c.is_empty() { cwd = c.to_string(); }
+            }
+            if let Some(entry) = value.get("entrypoint").and_then(|v| v.as_str()) {
+                sdk_entrypoint = entry.starts_with("sdk");
+            }
+            if value.pointer("/origin/kind").and_then(|v| v.as_str()) == Some("human") {
+                human_prompt = true;
             }
             let row_title = |key: &str| -> Option<String> {
                 value.get(key)
@@ -1558,6 +1567,9 @@ fn parse_agent_jsonl(
     if real_user_messages == 0 {
         return None;
     }
+    if is_headless_claude_run(sdk_entrypoint, human_prompt) {
+        return None;
+    }
     let turn_count = if total_messages > 0 { std::cmp::max(1, (total_messages + 1) / 2) } else { 0 };
 
     // Fallback date from file metadata
@@ -1597,6 +1609,18 @@ fn parse_agent_jsonl(
         file_path: Some(file_path.to_string_lossy().into_owned()),
         turn_count: Some(turn_count),
     })
+}
+
+/// Whether a Claude Code transcript is a scripted run (`claude -p`, the Agent
+/// SDK, an orchestrator dispatching reviewers) rather than a conversation the
+/// user had. Those runs pile up by the dozen under one templated prompt and
+/// bury the real sessions in the list. Claude Code stamps every row with
+/// `entrypoint` (`cli` for the interactive TUI, `sdk-*` for headless hosts) and
+/// marks typed prompts with `origin.kind == "human"`; a GUI host that drives
+/// the SDK on a person's behalf still carries the latter, so it stays listed.
+/// Transcripts that predate both fields have neither marker and are kept.
+fn is_headless_claude_run(sdk_entrypoint: bool, human_prompt: bool) -> bool {
+    sdk_entrypoint && !human_prompt
 }
 
 /// CodeBuddy Code sessions live at
@@ -1961,7 +1985,7 @@ fn parse_codex_session_jsonl(file_path: &std::path::Path) -> Option<SavedSession
             // for the marker rationale. `forked_from_id` is deliberately NOT a
             // marker: it identifies user-initiated fork/resume sessions, which
             // are legitimate top-level user sessions and must stay visible.
-            if is_codex_subagent_session(payload) {
+            if is_codex_subagent_session(payload) || is_codex_exec_session(payload) {
                 return None;
             }
             if let Some(id) = payload.get("id").and_then(|v| v.as_str()) {
@@ -2122,6 +2146,13 @@ fn is_codex_subagent_session(payload: &serde_json::Value) -> bool {
         .get("thread_source")
         .and_then(|v| v.as_str())
         .map_or(false, |s| s == "subagent")
+}
+
+/// Whether a Codex `session_meta` payload belongs to a headless `codex exec`
+/// run (`SessionSource::Exec`, serialized as `"source": "exec"`) rather than
+/// an interactive session. Same reasoning as `is_headless_claude_run`.
+fn is_codex_exec_session(payload: &serde_json::Value) -> bool {
+    payload.get("source").and_then(|v| v.as_str()) == Some("exec")
 }
 
 /// Parse a Qwen Code session jsonl. Layout:
@@ -6105,6 +6136,52 @@ mod tests {
         write_jsonl(&f, &["{\"type\":\"ai-title\",\"aiTitle\":\"Orphan\",\"sessionId\":\"title-only\"}"]);
         assert!(parse_agent_jsonl(&f, "claude", &std::collections::HashMap::new()).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Marker fields as real Claude Code rows carry them.
+    #[test]
+    fn claude_headless_runs_are_not_listed() {
+        let dir = std::env::temp_dir().join(format!("coffee-cli-headless-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = std::collections::HashMap::new();
+        let reply = "{\"type\":\"assistant\",\"entrypoint\":\"sdk-cli\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}";
+
+        let f = dir.join("sdk.jsonl");
+        write_jsonl(&f, &[
+            "{\"type\":\"user\",\"entrypoint\":\"sdk-cli\",\"promptSource\":\"sdk\",\"message\":{\"role\":\"user\",\"content\":\"You are a read-only code reviewer.\"}}",
+            reply,
+        ]);
+        assert!(parse_agent_jsonl(&f, "claude", &empty).is_none(), "a scripted SDK run is not a conversation");
+
+        let f = dir.join("sdk-human.jsonl");
+        write_jsonl(&f, &[
+            "{\"type\":\"user\",\"entrypoint\":\"sdk-cli\",\"origin\":{\"kind\":\"human\"},\"message\":{\"role\":\"user\",\"content\":\"can you see the app\"}}",
+            reply,
+        ]);
+        assert!(parse_agent_jsonl(&f, "claude", &empty).is_some(), "a person typing through an SDK host stays listed");
+
+        let f = dir.join("tui.jsonl");
+        write_jsonl(&f, &[
+            "{\"type\":\"user\",\"entrypoint\":\"cli\",\"promptSource\":\"typed\",\"origin\":{\"kind\":\"human\"},\"message\":{\"role\":\"user\",\"content\":\"fix the history bug\"}}",
+        ]);
+        assert!(parse_agent_jsonl(&f, "claude", &empty).is_some());
+        // Transcripts without either marker (older builds, other tools) are kept:
+        // see keeps_real_session_with_real_user_message.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn codex_exec_runs_are_not_listed() {
+        assert!(is_codex_exec_session(&serde_json::json!({ "source": "exec", "originator": "codex_exec" })));
+        assert!(!is_codex_exec_session(&serde_json::json!({ "source": "vscode" })));
+        assert!(!is_codex_exec_session(&serde_json::json!({ "source": { "subagent": "review" } })));
+        assert!(!is_codex_exec_session(&serde_json::json!({})), "legacy rollouts without `source` are kept");
+
+        let path = write_codex_rollout("exec-run", serde_json::json!("exec"), Some("user"), None);
+        let session = parse_codex_session_jsonl(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(session.is_none(), "codex exec rollouts are dropped");
     }
 
     #[test]
