@@ -66,6 +66,7 @@ const TOOL_ICON_SRC: Record<string, string> = {
   claude:      CLAUDE_DATA_URL,
   codex:       '/icons/tools/codex.svg',
   qwen:        '/icons/tools/qwen.svg',
+  antigravity: '/icons/tools/antigravity.svg',
   hermes:      HERMES_DATA_URL,
   opencode:    OPENCODE_DATA_URL,
   kimicode:    KIMICODE_DATA_URL,

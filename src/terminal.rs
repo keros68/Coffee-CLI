@@ -256,6 +256,18 @@ pub const AGENT_PRESETS: &[AgentPreset] = &[
         ),
         token_format: Some(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"),
     },
+    // Antigravity CLI (Google) — `agy --conversation <uuid>`. The id is the
+    // conversation's folder name under `~/.gemini/antigravity-cli/brain/`, so
+    // resume tokens only ever come from the history pass
+    // (`find_antigravity_cli_sessions`); nothing in stdout is scraped.
+    AgentPreset {
+        tool_name: "antigravity",
+        resume_program: Some("agy"),
+        resume_args_before: &["--conversation"],
+        resume_args_after: &[],
+        session_id_pattern: None,
+        token_format: Some(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"),
+    },
     AgentPreset {
         tool_name: "hermes",
         resume_program: Some("hermes"),
@@ -1294,7 +1306,7 @@ mod tests {
 
     #[test]
     fn find_preset_known_tools() {
-        for tool in &["claude", "hermes", "pi", "kimicode"] {
+        for tool in &["claude", "antigravity", "hermes", "pi", "kimicode"] {
             assert!(find_preset(tool).is_some(), "preset not found for {tool}");
         }
     }
@@ -1308,7 +1320,7 @@ mod tests {
         assert!(find_preset("definitely_not_a_tool").is_none());
         assert!(find_preset("").is_none());
         assert!(find_preset("gpt").is_none());
-        assert!(find_preset("antigravity").is_none(), "T3 tools have no resume preset");
+        assert!(find_preset("goose").is_none(), "T3 tools have no resume preset");
     }
 
     #[test]
