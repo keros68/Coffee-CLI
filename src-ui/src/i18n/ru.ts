@@ -97,6 +97,18 @@ export const ru = {
   'time.yesterday': 'Вчера',
   'time.days_ago': '{days} дн. назад',
 
+  // Session sections — user-defined buckets in the session list
+  'group.ungrouped': 'Без раздела',
+  'group.actions': 'Действия раздела',
+  'group.show_more': 'Показать ещё ({count})',
+  'group.new': 'Раздел',
+  'group.new_named': 'Новый раздел «{name}»',
+  'group.move_into': 'Переместить в «{name}»',
+  'group.remove_from': 'Убрать из «{name}»',
+  'group.rename': 'Переименовать раздел',
+  'group.auto_off': 'Отключить авторазделение',
+  'group.delete': 'Удалить раздел',
+
   // Settings modal (titlebar gear)
   'settings.title': 'Настройки',
   'settings.general': 'Общие',

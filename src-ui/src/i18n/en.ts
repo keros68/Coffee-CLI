@@ -97,6 +97,18 @@ export const en = {
   'time.yesterday': 'Yesterday',
   'time.days_ago': '{days} days ago',
 
+  // Session sections (分区) — user-defined buckets in the 会话记录 list
+  'group.ungrouped': 'Ungrouped',
+  'group.actions': 'Section actions',
+  'group.show_more': 'Show more ({count})',
+  'group.new': 'Section',
+  'group.new_named': 'New section “{name}”',
+  'group.move_into': 'Move to “{name}”',
+  'group.remove_from': 'Remove from “{name}”',
+  'group.rename': 'Rename section',
+  'group.auto_off': 'Stop auto-assigning',
+  'group.delete': 'Delete section',
+
   // Settings modal (titlebar gear)
   'settings.title': 'Settings',
   'settings.general': 'General',

@@ -97,6 +97,18 @@ export const ja = {
   'time.yesterday': '昨日',
   'time.days_ago': '{days} 日前',
 
+  // Session sections — user-defined buckets in the session list
+  'group.ungrouped': '未分類',
+  'group.actions': 'セクション操作',
+  'group.show_more': 'もっと見る（{count}）',
+  'group.new': 'セクション',
+  'group.new_named': '新しいセクション「{name}」',
+  'group.move_into': '「{name}」に移動',
+  'group.remove_from': '「{name}」から外す',
+  'group.rename': 'セクション名を変更',
+  'group.auto_off': '自動分類を停止',
+  'group.delete': 'セクションを削除',
+
   // Settings modal (titlebar gear)
   'settings.title': '設定',
   'settings.general': '一般',

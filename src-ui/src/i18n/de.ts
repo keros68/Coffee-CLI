@@ -97,6 +97,18 @@ export const de = {
   'time.yesterday': 'Gestern',
   'time.days_ago': 'Vor {days} Tagen',
 
+  // Session sections — user-defined buckets in the session list
+  'group.ungrouped': 'Ohne Gruppe',
+  'group.actions': 'Abschnittsaktionen',
+  'group.show_more': 'Mehr anzeigen ({count})',
+  'group.new': 'Abschnitt',
+  'group.new_named': 'Neuer Abschnitt „{name}“',
+  'group.move_into': 'Verschieben nach „{name}“',
+  'group.remove_from': 'Entfernen aus „{name}“',
+  'group.rename': 'Abschnitt umbenennen',
+  'group.auto_off': 'Automatische Zuordnung beenden',
+  'group.delete': 'Abschnitt löschen',
+
   // Settings modal (titlebar gear)
   'settings.title': 'Einstellungen',
   'settings.general': 'Allgemein',

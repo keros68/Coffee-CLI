@@ -15,6 +15,18 @@ import {
 import { subscribeHidden, getHiddenSnapshot, hideSession } from '../../lib/hidden-sessions';
 import { subscribePinned, getPinnedSnapshot } from '../../lib/pinned-sessions';
 import { subscribeRenamed, getRenamedSnapshot, setCustomName } from '../../lib/renamed-sessions';
+import {
+  subscribeGroups,
+  getGroupsSnapshot,
+  bucketSessions,
+  sessionKey,
+  renameGroup,
+  deleteGroup,
+  setGroupCollapsed,
+  setGroupRule,
+  type SessionGroup,
+} from '../../lib/session-groups';
+import { SessionCard, SessionSectionHeader } from './SessionCard';
 import { SessionContextMenu, type SessionCtxMenuState } from './SessionContextMenu';
 import { useTextContextMenu } from '../../lib/use-text-context-menu';
 // hermes/opencode PNG assets live in src/icons-inline/ so the Launchpad
@@ -362,11 +374,34 @@ export function HistoryBoard() {
   // change.
   const PAGE = 30;
   const [visibleCount, setVisibleCount] = useState(PAGE);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  // 分区 (sections) — local buckets over the flat list. Nothing renders
+  // differently until the user creates one, so an unused feature costs the
+  // existing view nothing.
+  const { groups, members } = useSyncExternalStore(subscribeGroups, getGroupsSnapshot);
+  const sectioned = groups.length > 0;
+  // Per-section paging. The flat list auto-loads on scroll (one observer);
+  // sections use an explicit "show more" per section instead, so a collapsed
+  // or short section can't fire an observer for a list nobody is reading.
+  const [visibleBySection, setVisibleBySection] = useState<Record<string, number>>({});
   /* eslint-disable-next-line react-hooks/set-state-in-effect -- A changed query/filter starts a new pagination window. */
-  useEffect(() => { setVisibleCount(PAGE); }, [debouncedQuery, activeProject]);
+  useEffect(() => { setVisibleCount(PAGE); setVisibleBySection({}); }, [debouncedQuery, activeProject]);
   const filteredSessions = matchedSessions.slice(0, visibleCount);
   const hasMore = matchedSessions.length > visibleCount;
-  const sentinelRef = useRef<HTMLDivElement>(null);
+
+  // Bucket the filtered rows. Section order is the user's; empty sections drop
+  // out; everything outside a rule/explicit move lands in the ungrouped
+  // bucket at the end. See bucketSessions().
+  const sections = useMemo(
+    () => (sectioned ? bucketSessions(groups, members, matchedSessions) : []),
+    [sectioned, groups, members, matchedSessions],
+  );
+
+  const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
+  const [groupNameDraft, setGroupNameDraft] = useState('');
+  const [groupMenu, setGroupMenu] = useState<{ group: SessionGroup; x: number; y: number } | null>(null);
+
   useEffect(() => {
     if (!hasMore) return;
     const el = sentinelRef.current;
@@ -379,6 +414,84 @@ export function HistoryBoard() {
     io.observe(el);
     return () => io.disconnect();
   }, [hasMore]);
+
+  // ── Row rendering (shared by both list shapes) ───────────────────────
+
+  const dateLabel = (session: SavedSession) => {
+    // Parse saved_at carefully to handle unix ms strings or invalid SystemTime strings
+    let savedMs = Date.parse(session.saved_at);
+    if (isNaN(savedMs)) {
+      const num = Number(session.saved_at);
+      if (!isNaN(num) && num > 0) savedMs = num < 1e11 ? num * 1000 : num;
+      else savedMs = nowMs - 86400000;
+    }
+    const dateDiff = nowMs - savedMs;
+    const now = new Date(nowMs);
+    const savedDate = new Date(savedMs);
+
+    const isSameDay = now.getDate() === savedDate.getDate() && now.getMonth() === savedDate.getMonth() && now.getFullYear() === savedDate.getFullYear();
+
+    const yesterday = new Date(nowMs - 86400000);
+    const isYesterday = yesterday.getDate() === savedDate.getDate() && yesterday.getMonth() === savedDate.getMonth() && yesterday.getFullYear() === savedDate.getFullYear();
+
+    if (dateDiff < 3600000) {
+      return t('time.just_now') || 'Just now';
+    }
+    if (isSameDay) {
+      return t('time.today') || 'Today';
+    }
+    if (isYesterday) {
+      return t('time.yesterday') || 'Yesterday';
+    }
+    const days = Math.floor(dateDiff / 86400000);
+    if (days < 7) {
+      return (t('time.days_ago') || '{days} days ago').replace('{days}', days.toString());
+    }
+    const locale = state.currentLang === 'zh-CN' ? 'zh-CN' : 'en-US';
+    return savedDate.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
+  };
+
+  const renderCard = (session: SavedSession) => {
+    const rowKey = sessionKey(session.tool, session.id);
+    const messages = session.turn_count
+      ? ` · ${(t('task.messages') || '{count} messages').replace('{count}', session.turn_count.toString())}`
+      : '';
+    // Agent conversations live in the agent service, not on disk — they get
+    // no tool icon, a fixed meta label, and no row context menu.
+    const isAgent = session.tool === 'coffee-agent';
+    return (
+      <SessionCard
+        key={`${rowKey}:${session.file_path ?? session.saved_at}`}
+        hideLabel={t('menu.delete')}
+        active={isAgent && session.id === activeAgentConversation && state.agentPageActive === 'agent'}
+        displayName={renamed[rowKey] ?? session.name}
+        toolIcon={isAgent ? null : getToolIcon(session.tool)}
+        metaText={`${isAgent ? 'Coffee Agent' : projectName(session.cwd, session.tool)} · ${dateLabel(session)}${messages}`}
+        isRenaming={renamingKey === rowKey}
+        renameValue={renameValue}
+        onOpen={() => handleViewHistory(session)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (isAgent) return;
+          setCtxMenu({ session, x: e.clientX, y: e.clientY });
+        }}
+        onRenameChange={setRenameValue}
+        onRenameCommit={() => {
+          if (!cancelRenameRef.current) setCustomName(session.tool ?? '', session.id, renameValue);
+          cancelRenameRef.current = false;
+          setRenamingKey(null);
+        }}
+        onRenameCancel={() => {
+          // Discard: flag the blur handler to skip the save, then unmount
+          // (blur fires on the way out).
+          cancelRenameRef.current = true;
+          setRenamingKey(null);
+        }}
+        onHide={() => hideSession(session.tool ?? '', session.id)}
+      />
+    );
+  };
 
   // Enter inline-rename mode on a card (invoked from the context menu).
   const startRename = (saved: SavedSession) => {
@@ -466,125 +579,54 @@ export function HistoryBoard() {
           </div>
         </div>
       ))}
-      {!isLoading && filteredSessions.map(session => {
-        // Parse saved_at carefully to handle unix ms strings or invalid SystemTime strings
-        let savedMs = Date.parse(session.saved_at);
-        if (isNaN(savedMs)) {
-          const num = Number(session.saved_at);
-          if (!isNaN(num) && num > 0) savedMs = num < 1e11 ? num * 1000 : num;
-          else savedMs = nowMs - 86400000;
-        }
-        const dateDiff = nowMs - savedMs;
-        let dateStr = '';
-        const now = new Date(nowMs);
-        const savedDate = new Date(savedMs);
-        
-        const isSameDay = now.getDate() === savedDate.getDate() && now.getMonth() === savedDate.getMonth() && now.getFullYear() === savedDate.getFullYear();
-        
-        const yesterday = new Date(nowMs - 86400000);
-        const isYesterday = yesterday.getDate() === savedDate.getDate() && yesterday.getMonth() === savedDate.getMonth() && yesterday.getFullYear() === savedDate.getFullYear();
-
-        if (dateDiff < 3600000) {
-          dateStr = t('time.just_now') || 'Just now';
-        } else if (isSameDay) {
-          dateStr = t('time.today') || 'Today';
-        } else if (isYesterday) {
-          dateStr = t('time.yesterday') || 'Yesterday';
-        } else {
-          const days = Math.floor(dateDiff / 86400000);
-          if (days < 7) {
-            dateStr = (t('time.days_ago') || '{days} days ago').replace('{days}', days.toString());
-          } else {
-            const locale = state.currentLang === 'zh-CN' ? 'zh-CN' : 'en-US';
-            dateStr = savedDate.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
-          }
-        }
-
-        const sessionKey = `${session.tool ?? ''}:${session.id}`;
-        const displayName = renamed[sessionKey] ?? session.name;
-        const isRenaming = renamingKey === sessionKey;
+      {/* Sectioned view (分区). Each section pages independently; the header
+          collapses it and carries the section menu. */}
+      {!isLoading && sectioned && sections.map(section => {
+        const limit = visibleBySection[section.id] ?? PAGE;
+        const rows = section.rows.slice(0, limit);
+        const remaining = section.rows.length - rows.length;
+        const collapsed = !!section.group?.collapsed;
         return (
-          <div
-            key={`${sessionKey}:${session.file_path ?? session.saved_at}`}
-            className={`history-card${session.tool === 'coffee-agent' && session.id === activeAgentConversation && state.agentPageActive === 'agent' ? ' history-card-active' : ''}`}
-            onClick={() => handleViewHistory(session)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (session.tool === 'coffee-agent') return;
-              setCtxMenu({ session, x: e.clientX, y: e.clientY });
-            }}
-          >
-            <div className="history-card-content">
-              <div className="history-card-title-row">
-                {isRenaming ? (
-                  <input
-                    className="history-card-rename-input"
-                    autoFocus
-                    value={renameValue}
-                    onChange={(e) => setRenameValue(e.target.value)}
-                    // Keep the card's click-to-resume and right-click menu off
-                    // the editing field.
-                    onClick={(e) => e.stopPropagation()}
-                    onContextMenu={(e) => e.stopPropagation()}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        cancelRenameRef.current = false;
-                        setCustomName(session.tool ?? '', session.id, renameValue);
-                        setRenamingKey(null);
-                      } else if (e.key === 'Escape') {
-                        // Discard: flag the blur handler to skip the save, then
-                        // unmount (blur fires on the way out).
-                        cancelRenameRef.current = true;
-                        setRenamingKey(null);
-                      }
-                    }}
-                    onBlur={() => {
-                      if (!cancelRenameRef.current) {
-                        setCustomName(session.tool ?? '', session.id, renameValue);
-                      }
-                      cancelRenameRef.current = false;
-                      setRenamingKey(null);
-                    }}
-                    onFocus={(e) => e.target.select()}
-                  />
-                ) : (
-                  <>
-                    <span className="history-card-title">{displayName}</span>
-                    {/* One-click soft-delete (hide), revealed in the title row.
-                        stopPropagation keeps it from resuming the session. */}
-                    <button
-                      type="button"
-                      className="history-card-delete-btn"
-                      aria-label={t('menu.delete')}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        hideSession(session.tool ?? '', session.id);
-                      }}
-                    >
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <polyline points="3 6 5 6 21 6"/>
-                        <path d="m19 6-.867 13.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 6"/>
-                        <path d="M10 11v6"/><path d="M14 11v6"/>
-                        <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
-                      </svg>
-                    </button>
-                  </>
-                )}
-              </div>
-              <div className="history-card-meta">
-                <span className="history-card-tool-wrap">
-                  {session.tool !== 'coffee-agent' && getToolIcon(session.tool)}
-                  <span className="history-card-meta-text">{session.tool === 'coffee-agent' ? 'Coffee Agent' : projectName(session.cwd, session.tool)} &middot; {dateStr} {session.turn_count ? ` · ${(t('task.messages') || '{count} messages').replace('{count}', session.turn_count.toString())}` : ''}</span>
-                </span>
-              </div>
-            </div>
+          <div key={section.id} className="history-section">
+            <SessionSectionHeader
+              name={section.group ? section.group.name : (t('group.ungrouped') || 'Ungrouped')}
+              count={section.rows.length}
+              collapsed={collapsed}
+              menuLabel={t('group.actions') || 'Section actions'}
+              isRenaming={!!section.group && renamingGroupId === section.group.id}
+              renameValue={groupNameDraft}
+              onToggle={() => {
+                if (section.group) setGroupCollapsed(section.group.id, !collapsed);
+              }}
+              onMenu={section.group ? (e) => {
+                setRenamingGroupId(null);
+                setGroupMenu({ group: section.group!, x: e.clientX, y: e.clientY });
+              } : undefined}
+              onRenameChange={setGroupNameDraft}
+              onRenameCommit={() => {
+                if (section.group && groupNameDraft.trim()) renameGroup(section.group.id, groupNameDraft);
+                setRenamingGroupId(null);
+              }}
+              onRenameCancel={() => setRenamingGroupId(null)}
+            />
+            {!collapsed && rows.map(renderCard)}
+            {!collapsed && remaining > 0 && (
+              <button
+                type="button"
+                className="history-section-more"
+                onClick={() => setVisibleBySection(v => ({ ...v, [section.id]: limit + PAGE }))}
+              >
+                {(t('group.show_more') || 'Show more ({count})').replace('{count}', String(remaining))}
+              </button>
+            )}
           </div>
         );
       })}
 
-      {hasMore && (
+      {/* Flat view — unchanged shape for users who never create a section. */}
+      {!isLoading && !sectioned && filteredSessions.map(renderCard)}
+
+      {!sectioned && hasMore && (
         <>
           {/* Skeleton placeholders give immediate visual feedback that
            * "more is coming" the moment scroll reaches the end —
@@ -606,12 +648,27 @@ export function HistoryBoard() {
         </>
       )}
 
-      {!isLoading && filteredSessions.length === 0 && (
+      {!isLoading && matchedSessions.length === 0 && (
         <div className="task-empty">
           <div className="task-empty-text">{t('menu.no_recent') || 'No recent sessions'}</div>
         </div>
       )}
     </div>
+
+    {/* Section menu (the header's ⋯ button): rename, stop auto-assigning,
+        delete. Same .ctx-menu surface as every other right-click menu. */}
+    {groupMenu && createPortal(
+      <GroupMenu
+        menu={groupMenu}
+        onClose={() => setGroupMenu(null)}
+        onRename={() => {
+          setGroupNameDraft(groupMenu.group.name);
+          setRenamingGroupId(groupMenu.group.id);
+          setGroupMenu(null);
+        }}
+      />,
+      document.body
+    )}
     {filterMenuOpen && filterMenuPos && createPortal(
       <>
         <div className="history-tool-filter-backdrop" onClick={() => setFilterMenuOpen(false)} />
@@ -649,8 +706,93 @@ export function HistoryBoard() {
       </>,
       document.body
     )}
-    {ctxMenu && <SessionContextMenu menu={ctxMenu} onClose={() => setCtxMenu(null)} onRename={startRename} />}
+    {ctxMenu && (
+      <SessionContextMenu
+        menu={ctxMenu}
+        onClose={() => setCtxMenu(null)}
+        onRename={startRename}
+      />
+    )}
     {ctxMenuEl}
   </>
+  );
+}
+
+/** Section-level menu, opened from a section header's ⋯ button. Deleting a
+ *  section never touches the sessions — they fall back to the ungrouped
+ *  bucket, which is why this needs no confirmation step. */
+function GroupMenu({ menu, onClose, onRename }: {
+  menu: { group: SessionGroup; x: number; y: number };
+  onClose: () => void;
+  onRename: () => void;
+}) {
+  const t = useT();
+  const menuRef = useRef<HTMLDivElement>(null);
+  const { group } = menu;
+
+  useEffect(() => {
+    const close = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) onClose();
+    };
+    const closeKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', closeKey);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', closeKey);
+    };
+  }, [onClose]);
+
+  const ICON_PROPS = {
+    width: 13, height: 13, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor',
+    strokeWidth: 2, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const,
+  };
+
+  const MENU_WIDTH = 220;
+  const MENU_HEIGHT = 160;
+  const style: React.CSSProperties = {
+    position: 'fixed',
+    ...(menu.y + MENU_HEIGHT > window.innerHeight
+      ? { bottom: Math.max(0, window.innerHeight - menu.y) }
+      : { top: menu.y }),
+    ...(menu.x + MENU_WIDTH > window.innerWidth
+      ? { right: Math.max(0, window.innerWidth - menu.x) }
+      : { left: menu.x }),
+  };
+
+  return createPortal(
+    <div className="ctx-menu" ref={menuRef} style={style}>
+      <button className="ctx-menu-item" onClick={onRename}>
+        <svg {...ICON_PROPS}>
+          <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
+        </svg>
+        {t('group.rename') || 'Rename section'}
+      </button>
+      {group.cwd && (
+        <button
+          className="ctx-menu-item"
+          onClick={() => { setGroupRule(group.id, null); onClose(); }}
+        >
+          <svg {...ICON_PROPS}>
+            <path d="M4 4h16v5H4z"/><path d="M4 13h10v7H4z"/>
+          </svg>
+          {t('group.auto_off') || 'Stop auto-assigning'}
+        </button>
+      )}
+      <div className="ctx-menu-divider" />
+      <button
+        className="ctx-menu-item"
+        onClick={() => { deleteGroup(group.id); onClose(); }}
+      >
+        <svg {...ICON_PROPS}>
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="m19 6-.867 13.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 6"/>
+          <path d="M10 11v6"/><path d="M14 11v6"/>
+          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+        </svg>
+        {t('group.delete') || 'Delete section'}
+      </button>
+    </div>,
+    document.body,
   );
 }

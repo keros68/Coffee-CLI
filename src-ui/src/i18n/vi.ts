@@ -99,6 +99,18 @@ export const vi = {
   'time.yesterday': 'Hôm qua',
   'time.days_ago': '{days} ngày trước',
 
+  // Session sections — user-defined buckets in the session list
+  'group.ungrouped': 'Chưa xếp nhóm',
+  'group.actions': 'Thao tác nhóm',
+  'group.show_more': 'Hiện thêm ({count})',
+  'group.new': 'Nhóm',
+  'group.new_named': 'Nhóm mới “{name}”',
+  'group.move_into': 'Chuyển vào “{name}”',
+  'group.remove_from': 'Bỏ khỏi “{name}”',
+  'group.rename': 'Đổi tên nhóm',
+  'group.auto_off': 'Ngừng tự động xếp nhóm',
+  'group.delete': 'Xóa nhóm',
+
   // Settings modal (titlebar gear)
   'settings.title': 'Cài đặt',
   'settings.general': 'Chung',

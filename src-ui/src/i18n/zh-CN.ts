@@ -97,6 +97,18 @@ export const zhCN = {
   'time.yesterday': '昨天',
   'time.days_ago': '{days}天前',
 
+  // Session sections (分区) — user-defined buckets in the 会话记录 list
+  'group.ungrouped': '未分组',
+  'group.actions': '分区操作',
+  'group.show_more': '显示更多（{count}）',
+  'group.new': '新建分区',
+  'group.new_named': '新建分区「{name}」',
+  'group.move_into': '移入「{name}」',
+  'group.remove_from': '移出「{name}」',
+  'group.rename': '重命名分区',
+  'group.auto_off': '停止自动归组',
+  'group.delete': '删除分区',
+
   // Settings modal (titlebar gear)
   'settings.title': '设置',
   'settings.general': '通用',

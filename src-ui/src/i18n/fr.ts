@@ -97,6 +97,18 @@ export const fr = {
   'time.yesterday': 'Hier',
   'time.days_ago': 'Il y a {days} jours',
 
+  // Session sections — user-defined buckets in the session list
+  'group.ungrouped': 'Sans section',
+  'group.actions': 'Actions de la section',
+  'group.show_more': 'Afficher plus ({count})',
+  'group.new': 'Section',
+  'group.new_named': 'Nouvelle section « {name} »',
+  'group.move_into': 'Déplacer vers « {name} »',
+  'group.remove_from': 'Retirer de « {name} »',
+  'group.rename': 'Renommer la section',
+  'group.auto_off': 'Arrêter l’assignation automatique',
+  'group.delete': 'Supprimer la section',
+
   // Settings modal (titlebar gear)
   'settings.title': 'Paramètres',
   'settings.general': 'Général',

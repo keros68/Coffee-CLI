@@ -4,9 +4,9 @@
 // `.ctx-menu-item` / `.ctx-menu-divider` classes (defined in Explorer.css,
 // already theme-aware incl. glass/carbon overrides + in the glass/carbon
 // nuclear `:not()` allowlist). Positioning, portal, and dismiss logic mirror
-// Explorer.tsx's `ContextMenu`. Items are session-specific (pin, copy ID /
-// resume command / full path, reveal in folder, delete) - NOT the file-system
-// actions the Explorer menu hardcodes.
+// Explorer.tsx's `ContextMenu`. Items are session-specific (pin, rename, section
+// membership, copy ID / resume command / full path, reveal in folder, delete)
+// - NOT the file-system actions the Explorer menu hardcodes.
 
 import { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
@@ -16,6 +16,15 @@ import { commands } from '../../tauri';
 import { clipboardWrite } from '../../lib/clipboard';
 import { hideSession } from '../../lib/hidden-sessions';
 import { togglePin, isPinned } from '../../lib/pinned-sessions';
+import { getToolDisplayName } from '../../lib/tool-info';
+import {
+  getGroupsSnapshot,
+  resolveGroupId,
+  assignSession,
+  createGroup,
+  projectLabel,
+  type SessionGroup,
+} from '../../lib/session-groups';
 import { buildResumeCommand } from '../../lib/resume-command';
 
 export interface SessionCtxMenuState {
@@ -39,6 +48,28 @@ export function SessionContextMenu({ menu, onClose, onRename }: { menu: SessionC
   const t = useT();
   const menuRef = useRef<HTMLDivElement>(null);
   const { session } = menu;
+  // Section membership, read once per open — a menu is transient, and the
+  // actions below write through the store, so no subscription is needed.
+  const { groups, members } = getGroupsSnapshot();
+  const currentGroupId = resolveGroupId(groups, members, session);
+  const currentGroup = groups.find(g => g.id === currentGroupId);
+  // Sections this session can be moved into. Capped: a menu is not a manager.
+  const moveTargets = groups.filter(g => g.id !== currentGroupId).slice(0, 8);
+  // Name for a section created from this row: its project, or the tool when the
+  // session has no project behind it (OpenClaw, Hermes, Remote Terminal). The
+  // auto-assign rule is only worth creating for a real project cwd — for the
+  // others it would point at an internal folder flag that no user recognises.
+  const projectFolder = projectLabel(session);
+  const sectionName = projectFolder ?? getToolDisplayName(session.tool ?? '');
+  const sectionRule = projectFolder ? (session.cwd ?? undefined) : undefined;
+
+  const handleCreateSection = () => {
+    const groupId = createGroup(sectionName || t('group.new') || 'Section', sectionRule);
+    assignSession(session.tool, session.id, groupId);
+    onClose();
+  };
+  const handleMove = (groupId: string) => { assignSession(session.tool, session.id, groupId); onClose(); };
+  const handleUngroup = () => { assignSession(session.tool, session.id, null); onClose(); };
 
   // Dismiss on outside-click + Escape - same as Explorer's ContextMenu.
   useEffect(() => {
@@ -73,13 +104,17 @@ export function SessionContextMenu({ menu, onClose, onRename }: { menu: SessionC
     try { await commands.showInFolder(filePath); } catch (e) { console.error('[HistoryBoard] show in folder failed:', e); }
   };
 
-  // Smart positioning - mirror Explorer's ContextMenu (overflow flip).
+  // Smart positioning - mirror Explorer's ContextMenu (overflow flip). The
+  // section items make the menu variable-height, so it caps at a scrollable
+  // height instead of running off the window.
   const MENU_WIDTH = 220;
-  const MENU_HEIGHT = 290;
+  const MENU_HEIGHT = 400; // pin, rename, sections, 3 copy, delete
   const isBottomOverflow = menu.y + MENU_HEIGHT > window.innerHeight;
   const isRightOverflow = menu.x + MENU_WIDTH > window.innerWidth;
   const style: React.CSSProperties = {
     position: 'fixed',
+    maxHeight: 'min(70vh, 560px)',
+    overflowY: 'auto',
     ...(isBottomOverflow ? { bottom: Math.max(0, window.innerHeight - menu.y) } : { top: menu.y }),
     ...(isRightOverflow ? { right: Math.max(0, window.innerWidth - menu.x) } : { left: menu.x }),
   };
@@ -100,6 +135,31 @@ export function SessionContextMenu({ menu, onClose, onRename }: { menu: SessionC
         </svg>
         {t('menu.rename')}
       </button>
+
+      <div className="ctx-menu-divider" />
+
+      {moveTargets.map((group: SessionGroup) => (
+        <button key={group.id} className="ctx-menu-item" onClick={() => handleMove(group.id)}>
+          <svg {...ICON_PROPS}>
+            <path d="M4 4h16v5H4z"/><path d="M4 13h10v7H4z"/>
+          </svg>
+          {(t('group.move_into') || 'Move to “{name}”').replace('{name}', group.name)}
+        </button>
+      ))}
+      <button className="ctx-menu-item" onClick={handleCreateSection}>
+        <svg {...ICON_PROPS}>
+          <path d="M4 4h16v5H4z"/><path d="M4 13h10v7H4z"/><path d="M17 16h4"/><path d="M19 14v4"/>
+        </svg>
+        {(t('group.new_named') || 'New section “{name}”').replace('{name}', sectionName || t('group.new') || 'Section')}
+      </button>
+      {currentGroup && (
+        <button className="ctx-menu-item" onClick={handleUngroup}>
+          <svg {...ICON_PROPS}>
+            <path d="M18 6 6 18"/><path d="m6 6 12 12"/>
+          </svg>
+          {(t('group.remove_from') || 'Remove from “{name}”').replace('{name}', currentGroup.name)}
+        </button>
+      )}
 
       {hasGroup2 && <div className="ctx-menu-divider" />}
 

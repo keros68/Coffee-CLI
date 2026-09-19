@@ -97,6 +97,18 @@ export const ko = {
   'time.yesterday': '어제',
   'time.days_ago': '{days}일 전',
 
+  // Session sections — user-defined buckets in the session list
+  'group.ungrouped': '미분류',
+  'group.actions': '섹션 작업',
+  'group.show_more': '더 보기 ({count})',
+  'group.new': '섹션',
+  'group.new_named': '새 섹션 “{name}”',
+  'group.move_into': '“{name}”(으)로 이동',
+  'group.remove_from': '“{name}”에서 제거',
+  'group.rename': '섹션 이름 바꾸기',
+  'group.auto_off': '자동 분류 끄기',
+  'group.delete': '섹션 삭제',
+
   // Settings modal (titlebar gear)
   'settings.title': '설정',
   'settings.general': '일반',

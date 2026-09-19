@@ -97,6 +97,18 @@ export const zhTW = {
   'time.yesterday': '昨天',
   'time.days_ago': '{days} 天前',
 
+  // Session sections — user-defined buckets in the session list
+  'group.ungrouped': '未分組',
+  'group.actions': '分組操作',
+  'group.show_more': '顯示更多（{count}）',
+  'group.new': '新分組',
+  'group.new_named': '新建分組「{name}」',
+  'group.move_into': '移入「{name}」',
+  'group.remove_from': '移出「{name}」',
+  'group.rename': '重新命名分組',
+  'group.auto_off': '停止自動分組',
+  'group.delete': '刪除分組',
+
   // Settings modal (titlebar gear)
   'settings.title': '設定',
   'settings.general': '通用',

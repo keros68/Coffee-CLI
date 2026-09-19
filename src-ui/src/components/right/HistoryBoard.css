@@ -354,3 +354,124 @@
   outline: none;
   caret-color: var(--accent);
 }
+
+/* ─── Sections (分区) ───────────────────────────────────────────────────────
+   Buckets over the same card list. A section header is deliberately quieter
+   than a card: same left gutter, smaller type, no surface fill — so the cards
+   stay the thing you scan and the headers only tell you where you are. */
+
+.history-section {
+  margin-bottom: 4px;
+}
+
+.history-section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 6px 6px 2px;
+  cursor: default;
+  user-select: none;
+  border-radius: var(--radius-xs);
+}
+
+.history-section-header:hover {
+  background: var(--bg-hover);
+}
+
+.history-section-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-3);
+  transform: rotate(0deg);
+  transition: transform 0.15s ease;
+}
+
+.history-section-chevron.collapsed {
+  transform: rotate(-90deg);
+}
+
+.history-section-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-section-count {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+
+.history-section-rename-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+  color: var(--text-1);
+  font-size: 11px;
+  font-family: var(--font, system-ui);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  outline: none;
+  caret-color: var(--accent);
+}
+
+.history-section-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.history-section-header:hover .history-section-menu-btn,
+.history-section-menu-btn:focus-visible {
+  opacity: 1;
+}
+
+.history-section-menu-btn:hover {
+  color: var(--text-1);
+  background: var(--bg-card);
+}
+
+.history-section-more {
+  display: block;
+  width: 100%;
+  margin: 0 0 8px;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11px;
+  font-family: var(--font, system-ui);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.history-section-more:hover {
+  background: var(--bg-hover);
+  color: var(--text-1);
+}
