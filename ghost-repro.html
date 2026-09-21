@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Coffee CLI terminal ghosting — standalone repro</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css">
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 24px 28px 48px; color: #e8e8ea;
+    font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    /* Stands in for a Coffee CLI wallpaper / backdrop shape: the terminal
+       canvas is transparent, so this shows through it. */
+    background: linear-gradient(135deg, #16321f 0%, #1a2340 45%, #3a2140 100%);
+    background-attachment: fixed;
+  }
+  h1 { font-size: 17px; margin: 0 0 6px; font-weight: 600; }
+  p { max-width: 80ch; color: #c2c6cf; }
+  code { color: #f0c987; }
+  table { border-collapse: collapse; margin: 14px 0 6px; }
+  th, td { text-align: left; padding: 5px 18px 5px 0; border-bottom: 1px solid #ffffff22; }
+  th { color: #9aa1ad; font-weight: 500; }
+  .num { font-variant-numeric: tabular-nums; }
+  .bad { color: #ff8b7a; font-weight: 600; }
+  .good { color: #7fd6a0; font-weight: 600; }
+  .panes { display: flex; flex-wrap: wrap; gap: 20px; margin-top: 20px; }
+  .pane h2 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
+  .pane .cap { font-size: 12px; color: #9aa1ad; margin: 0 0 8px; max-width: 56ch; }
+  .host { width: 560px; height: 232px; }
+  /* xterm.css ships an opaque .xterm-viewport; Coffee CLI overrides it so the
+     backdrop shows through. Match the app. */
+  .host .xterm-viewport { background-color: transparent !important; }
+  #status { color: #f0c987; }
+  #env { color: #8d94a0; font-size: 12px; margin-top: 20px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Coffee CLI terminal ghosting — standalone repro</h1>
+<p>
+  Reproduces issues #47 / #74 without a Coffee build, using the renderer Coffee
+  ships: <code>@xterm/xterm</code> 6.0.0 + <code>@xterm/addon-webgl</code>
+  0.19.0, pinned, from jsDelivr, with <code>TierTerminal</code>'s options. Open
+  it in any Chromium browser — no server needed, but it has to be the visible
+  tab, since Chrome does not render a hidden one.
+</p>
+<p>
+  Each run streams 8 changing TUI frames into a terminal while its wrapper is
+  masked with <code>opacity: 0</code> — what <code>TierTerminal</code> does for
+  150&nbsp;ms on tab switch-back and 180&nbsp;ms on window foreground — then
+  refreshes and unmasks. Lit pixels in the WebGL drawing buffer are counted with
+  <code>readPixels</code> from inside xterm's render callback, so a frame is
+  measured before the compositor ever sees it. A correct result is
+  <strong>1.0×</strong>: the revealed frame holds one frame's worth of text.
+</p>
+<p id="status">starting…</p>
+<div id="results"></div>
+<div class="panes">
+  <div class="pane">
+    <h2>1. Transparent background — the bug</h2>
+    <p class="cap">What a wallpaper or a glass / frost / carbon / monogram shape produces today.</p>
+    <div class="host" id="host-bug"></div>
+  </div>
+  <div class="pane">
+    <h2>2. Transparent background, buffer cleared before the reveal</h2>
+    <p class="cap">The proposed fix, same sequence.</p>
+    <div class="host" id="host-fix"></div>
+  </div>
+  <div class="pane">
+    <h2>3. Opaque background, unfixed</h2>
+    <p class="cap">The default theme. Its background rectangle is opaque, so it erases the
+      previous frame and nothing piles up — which is why this never shows up there.</p>
+    <div class="host" id="host-opaque"></div>
+  </div>
+</div>
+<div id="env"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.19.0/lib/addon-webgl.js"></script>
+<script>
+const FRAMES_UNDER_MASK = 8;
+const raf = () => new Promise(r => requestAnimationFrame(r));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const write = (term, data) => new Promise(r => term.write(data, r));
+
+// Chrome delivers no animation frames to a hidden tab, so xterm cannot render
+// and a run would stall with nothing on screen to explain why.
+function whenVisible(onWaiting) {
+  if (document.visibilityState === 'visible') return Promise.resolve();
+  onWaiting();
+  return new Promise(resolve => {
+    const check = () => {
+      if (document.visibilityState !== 'visible') return;
+      document.removeEventListener('visibilitychange', check);
+      resolve();
+    };
+    document.addEventListener('visibilitychange', check);
+  });
+}
+
+// TierTerminal's options. `background` is what buildXtermTheme() produces:
+// 'rgba(0,0,0,0)' when hasBg is true (a wallpaper or a backdrop shape), the
+// opaque theme colour otherwise.
+function makeTerminal(host, transparent) {
+  const term = new Terminal({
+    cols: 64, rows: 10, fontSize: 14, lineHeight: 1.3,
+    fontWeight: '400', fontWeightBold: '400',
+    allowTransparency: transparent,
+    customGlyphs: true, rescaleOverlappingGlyphs: true,
+    cursorBlink: false, cursorInactiveStyle: 'none',
+    scrollback: 5000, allowProposedApi: true,
+    theme: {
+      background: transparent ? 'rgba(0,0,0,0)' : '#16181d',
+      foreground: '#e6e6e6',
+    },
+  });
+  term.open(host);
+  term.loadAddon(new WebglAddon.WebglAddon());
+  return term;
+}
+
+// The proposed fix, as it would run in TierTerminal immediately before the
+// refresh that reveals the canvas.
+function clearWebglDrawingBuffers(canvases) {
+  let cleared = 0;
+  for (const canvas of canvases) {
+    let gl = null;
+    try { gl = canvas.getContext('webgl2'); } catch { continue; }
+    if (!gl || gl.isContextLost()) continue;
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    cleared++;
+  }
+  return cleared;
+}
+
+function litPixels(host) {
+  const canvas = [...host.querySelectorAll('canvas')].find(c => c.getContext('webgl2'));
+  if (!canvas) return 0;
+  const gl = canvas.getContext('webgl2');
+  const px = new Uint8Array(canvas.width * canvas.height * 4);
+  gl.readPixels(0, 0, canvas.width, canvas.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  let lit = 0;
+  for (let i = 0; i < px.length; i += 4) if (px[i] > 150 && px[i + 1] > 150) lit++;
+  return lit;
+}
+
+// An agent TUI frame whose rows shift sideways as its counters grow, so
+// successive frames land on different pixels — what makes the overlap legible
+// in #74's screenshot.
+const tuiFrame = step => '\x1b[2J\x1b[H' + Array.from({ length: 8 }, (_, row) =>
+  ' '.repeat((step * 3 + row) % 11) + `agent row ${row}  tokens ${1000 + step * 137}  step ${step}`,
+).join('\r\n');
+
+async function run({ hostId, transparent, applyFix }) {
+  const host = document.getElementById(hostId);
+  host.replaceChildren();
+  const term = makeTerminal(host, transparent);
+  // readPixels forces a GPU sync, so sample only the two frames that matter.
+  // An arming flag alone would race the empty render xterm emits while it is
+  // still attaching its renderer, so drive the sampled frame explicitly.
+  let sample = false, sampled = 0;
+  term.onRender(() => {
+    if (!sample) return;
+    sample = false;
+    sampled = litPixels(host);
+  });
+  const sampleFrame = async () => {
+    sample = true;
+    term.refresh(0, term.rows - 1);
+    await raf(); await raf();
+    return sampled;
+  };
+
+  // One clean frame, composited, as the baseline.
+  await write(term, tuiFrame(0));
+  await raf(); await raf(); await sleep(60);
+  const baseline = await sampleFrame();
+
+  // Masked: the canvas stops being composited, so Chromium stops clearing its
+  // drawing buffer between frames.
+  host.style.opacity = '0';
+  for (let step = 1; step <= FRAMES_UNDER_MASK; step++) {
+    await write(term, tuiFrame(step));
+    await raf();
+  }
+
+  // TierTerminal's reveal: refresh, then unmask on the resulting render.
+  if (applyFix) clearWebglDrawingBuffers(host.querySelectorAll('canvas'));
+  const revealed = await sampleFrame();
+  host.style.opacity = '';
+  await raf(); await sleep(60);
+  return { baseline, revealed, ratio: revealed / (baseline || 1) };
+}
+
+function gpuInfo() {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl2');
+    const ext = gl?.getExtension('WEBGL_debug_renderer_info');
+    if (!gl || !ext) return 'unavailable';
+    return `${gl.getParameter(ext.UNMASKED_VENDOR_WEBGL)} — ${gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)}`;
+  } catch { return 'unavailable'; }
+}
+
+async function main() {
+  const status = document.getElementById('status');
+  if (typeof Terminal !== 'function' || typeof WebglAddon === 'undefined') {
+    status.textContent = 'Could not load xterm from jsDelivr — check the network, then reload.';
+    return null;
+  }
+  await whenVisible(() => {
+    status.textContent = 'Waiting — Chrome renders nothing in a hidden tab. '
+      + 'Switch to this tab and it starts.';
+  });
+  status.textContent = 'running…';
+
+  const bug = await run({ hostId: 'host-bug', transparent: true, applyFix: false });
+  const fixed = await run({ hostId: 'host-fix', transparent: true, applyFix: true });
+  const opaque = await run({ hostId: 'host-opaque', transparent: false, applyFix: false });
+
+  const verdict = r => r > 1.3
+    ? `<span class="bad">${r.toFixed(2)}× — ghosted</span>`
+    : `<span class="good">${r.toFixed(2)}× — clean</span>`;
+  document.getElementById('results').innerHTML = `
+    <table>
+      <tr><th>terminal background</th><th>fix</th><th>clean frame</th>
+          <th>revealed frame</th><th>result</th></tr>
+      <tr><td>transparent (wallpaper / backdrop shape)</td><td>no</td>
+          <td class="num">${bug.baseline}</td><td class="num">${bug.revealed}</td>
+          <td>${verdict(bug.ratio)}</td></tr>
+      <tr><td>transparent (wallpaper / backdrop shape)</td><td>yes</td>
+          <td class="num">${fixed.baseline}</td><td class="num">${fixed.revealed}</td>
+          <td>${verdict(fixed.ratio)}</td></tr>
+      <tr><td>opaque (default theme)</td><td>no</td>
+          <td class="num">${opaque.baseline}</td><td class="num">${opaque.revealed}</td>
+          <td>${verdict(opaque.ratio)}</td></tr>
+    </table>
+    <p>Lit pixels in the WebGL drawing buffer, ${FRAMES_UNDER_MASK} frames rendered
+    under the mask in every run.</p>`;
+  status.textContent = bug.ratio > 1.3 && fixed.ratio <= 1.3
+    ? 'Reproduced: terminal 1 below shows several frames at once, terminals 2 and 3 show one.'
+    : 'Finished — see the numbers above and the terminals below.';
+  document.getElementById('env').textContent =
+    `${navigator.userAgent}\nGPU: ${gpuInfo()}\ndevicePixelRatio: ${devicePixelRatio}`;
+  return { bug, fixed, opaque };
+}
+
+window.reproResult = main();
+</script>
+</body>
+</html>
