@@ -3708,6 +3708,132 @@ fn kimi_root(home: &std::path::Path) -> Option<std::path::PathBuf> {
     if path.is_dir() { Some(path) } else { None }
 }
 
+/// Process-lifetime memo for `kimi_first_user_prompt`. A session's first
+/// prompt is write-once, so a hit never goes stale — and the native-history
+/// cache has a 5 s TTL, which would otherwise have every untitled session's
+/// wire log re-read a dozen times a minute while the History board is open.
+/// Misses are deliberately not memoized: a session that is still empty when
+/// it is first scanned picks up its title as soon as the user types.
+fn kimi_first_user_prompt_cached(session_id: &str, session_dir: &std::path::Path) -> Option<String> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Ok(map) = cache.lock() {
+        if let Some(hit) = map.get(session_id) {
+            return Some(hit.clone());
+        }
+    }
+    let prompt = kimi_first_user_prompt(session_dir)?;
+    if let Ok(mut map) = cache.lock() {
+        map.insert(session_id.to_string(), prompt.clone());
+    }
+    Some(prompt)
+}
+
+/// First thing the user typed in a Kimi Code session, for sessions Kimi never
+/// titled. `state.json` carries `title` (and `lastPrompt` alongside it) only
+/// once Kimi has generated one; until then the row reads as a bare "Kimi Code
+/// Session" even for a long conversation.
+///
+/// The prompt is the first `turn.prompt` row carrying `origin.kind == "user"`
+/// in the main agent's wire log, always within the first handful of lines —
+/// the rows ahead of it are the session's own metadata (tool discovery,
+/// profile bind), which are large but few. The scan stops at the first hit,
+/// and the substring test keeps those large metadata rows from being parsed
+/// at all.
+fn kimi_first_user_prompt(session_dir: &std::path::Path) -> Option<String> {
+    use std::io::{BufRead, Read};
+
+    // Generous enough for the metadata preamble, bounded so a malformed log
+    // can never turn one history scan into a full-file read. The byte budget
+    // is enforced by `Read::take` on the file itself, so a single pathological
+    // line cannot be allocated past it before the check runs.
+    const MAX_LINES: usize = 200;
+    const MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+    let wire = session_dir.join("agents").join("main").join("wire.jsonl");
+    let file = std::fs::File::open(wire).ok()?;
+    let reader = std::io::BufReader::with_capacity(SESSION_READ_BUF, file.take(MAX_BYTES));
+
+    for (seen, line) in reader.lines().map_while(Result::ok).enumerate() {
+        if seen >= MAX_LINES {
+            break;
+        }
+        if !line.contains("\"turn.prompt\"") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        if value.get("type").and_then(|v| v.as_str()) != Some("turn.prompt") {
+            continue;
+        }
+        // Steering messages and replayed rows carry other origins; only what
+        // the user typed should name the session.
+        if value.pointer("/origin/kind").and_then(|v| v.as_str()) != Some("user") {
+            continue;
+        }
+        let text: String = value
+            .get("input")
+            .and_then(|v| v.as_array())
+            .map(|parts| {
+                parts
+                    .iter()
+                    .filter(|part| part.get("type").and_then(|v| v.as_str()) == Some("text"))
+                    .filter_map(|part| part.get("text").and_then(|v| v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        let redacted = redact_kimi_prompt(&text);
+        if !redacted.is_empty() {
+            return Some(redacted);
+        }
+    }
+    None
+}
+
+/// Mirror of Kimi Code's own prompt-metadata scrubbing
+/// (`agent-core-v2/src/agent/prompt/promptMetadataText.ts`). The CLI runs a
+/// prompt through this before it ever reaches `lastPrompt` or a title, so a
+/// title recovered from the raw wire log has to do the same — otherwise a
+/// prompt that pasted a key would put it in the session list.
+///
+/// The credential-pair rule is applied case-insensitively: erring towards
+/// redacting more than the CLI would is the safe direction for a title.
+fn redact_kimi_prompt(text: &str) -> String {
+    type Rule = (regex::Regex, &'static str);
+    static RULES: OnceLock<Vec<Rule>> = OnceLock::new();
+    let rules = RULES.get_or_init(|| {
+        [
+            (r"(?s)-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", "[redacted]"),
+            (r"(?i)\b(authorization)\s*:\s*bearer\s+\S+", "${1}: Bearer [redacted]"),
+            (
+                r#"(?i)\b(api[_-]?key|token|secret|password|passwd|pwd)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)"#,
+                "${1}=[redacted]",
+            ),
+            (r"\bsk-[A-Za-z0-9_-]{12,}\b", "[redacted]"),
+            (r"\b[A-Za-z0-9][A-Za-z0-9+/=_-]{39,}\b", "[redacted]"),
+        ]
+        .into_iter()
+        .filter_map(|(pattern, replacement)| {
+            regex::Regex::new(pattern).ok().map(|re| (re, replacement))
+        })
+        .collect()
+    });
+
+    let mut out = std::borrow::Cow::Borrowed(text);
+    for (re, replacement) in rules {
+        if re.is_match(&out) {
+            out = std::borrow::Cow::Owned(re.replace_all(&out, *replacement).into_owned());
+        }
+    }
+    // Control characters become spaces and runs of whitespace collapse, as the
+    // CLI does, so a pasted multi-line prompt reads as one title line.
+    let flattened: String = out
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    flattened.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Kimi Code history second pass. Reads `session_index.jsonl`, stats each
 /// `state.json` for mtime to pre-select the newest 200 (mirrors the JSONL
 /// pipeline's stat-first/parse-top-N discipline), then reads each survivor's
@@ -3745,6 +3871,11 @@ fn find_kimi_sessions(home: &std::path::Path, result: &mut Vec<SavedSession>) {
             .get("title").and_then(|x| x.as_str()).filter(|s| !s.is_empty())
             .or_else(|| state.get("lastPrompt").and_then(|x| x.as_str()))
             .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            // Kimi titles a session only after it has generated one; until
+            // then fall back to what the user typed, the same way every other
+            // tool's parser names an untitled session.
+            .or_else(|| kimi_first_user_prompt_cached(session_id, session_dir))
             .map(|s| {
                 let safe = s.replace('\n', " ");
                 let mut chars = safe.chars();
@@ -6707,6 +6838,104 @@ mod tests {
     // conversation log..." injection as its user line plus the assistant's
     // generated summary — no real user input. It must NOT surface as a
     // phantom "Claude Session" card. See parse_agent_jsonl.
+    fn write_kimi_wire(session_dir: &std::path::Path, lines: &[&str]) {
+        let main = session_dir.join("agents").join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        write_jsonl(&main.join("wire.jsonl"), lines);
+    }
+
+    #[test]
+    fn kimi_first_prompt_names_a_session_kimi_never_titled() {
+        let home = std::env::temp_dir().join("coffee-cli-test-kimi-first-prompt");
+        let _ = std::fs::remove_dir_all(&home); // clean slate if a prior run left it behind
+        let dir = home.join("session_a");
+
+        // The rows Kimi writes before the user's first turn are large but few;
+        // the prompt is the first `turn.prompt` carrying `origin.kind: user`.
+        write_kimi_wire(&dir, &[
+            "{\"type\":\"metadata\",\"protocol_version\":1}",
+            "{\"type\":\"mcp.tools_discovered\",\"serverName\":\"x\",\"tools\":[]}",
+            "{\"type\":\"turn.prompt\",\"input\":[{\"type\":\"text\",\"text\":\"  重构历史扫描  \"}],\"origin\":{\"kind\":\"user\"}}",
+            "{\"type\":\"turn.prompt\",\"input\":[{\"type\":\"text\",\"text\":\"later turn\"}],\"origin\":{\"kind\":\"user\"}}",
+        ]);
+        assert_eq!(
+            kimi_first_user_prompt(&dir).as_deref(),
+            Some("重构历史扫描"),
+            "the first user turn names the session, trimmed",
+        );
+
+        // Replayed/steering rows are not what the user typed.
+        let non_user = home.join("session_b");
+        write_kimi_wire(&non_user, &[
+            "{\"type\":\"turn.prompt\",\"input\":[{\"type\":\"text\",\"text\":\"injected\"}],\"origin\":{\"kind\":\"system\"}}",
+            "{\"type\":\"turn.steer\",\"input\":[{\"type\":\"text\",\"text\":\"steer\"}],\"origin\":{\"kind\":\"user\"}}",
+            "{\"type\":\"turn.prompt\",\"input\":[{\"type\":\"text\",\"text\":\"real one\"}],\"origin\":{\"kind\":\"user\"}}",
+        ]);
+        assert_eq!(kimi_first_user_prompt(&non_user).as_deref(), Some("real one"));
+
+        // Non-text parts contribute nothing; an empty prompt is not a title.
+        let empty = home.join("session_c");
+        write_kimi_wire(&empty, &[
+            "{\"type\":\"turn.prompt\",\"input\":[{\"type\":\"image\",\"url\":\"x\"}],\"origin\":{\"kind\":\"user\"}}",
+        ]);
+        assert_eq!(kimi_first_user_prompt(&empty), None, "no text, no title");
+
+        // A session with no wire log at all falls through to the caller.
+        assert_eq!(kimi_first_user_prompt(&home.join("missing")), None);
+
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn kimi_fallback_title_redacts_what_the_cli_would_have_redacted() {
+        // The exact case raised in review: a prompt carrying a credential must
+        // not reach the session list verbatim.
+        let redacted = redact_kimi_prompt("deploy with api_key=example-secret now");
+        assert!(!redacted.contains("example-secret"), "got {redacted:?}");
+        assert_eq!(redacted, "deploy with api_key=[redacted] now");
+
+        assert_eq!(
+            redact_kimi_prompt("Authorization: Bearer abc.def.ghi"),
+            "Authorization: Bearer [redacted]",
+        );
+        assert_eq!(
+            redact_kimi_prompt("use sk-abcdefghijklmnop please"),
+            "use [redacted] please",
+        );
+        assert!(
+            !redact_kimi_prompt("-----BEGIN RSA PRIVATE KEY-----
+MIIE
+-----END RSA PRIVATE KEY-----")
+                .contains("MIIE"),
+        );
+        assert_eq!(
+            redact_kimi_prompt(&format!("blob {} end", "A".repeat(48))),
+            "blob [redacted] end",
+        );
+
+        // Newlines and runs of whitespace collapse so the title is one line.
+        assert_eq!(redact_kimi_prompt("first line
+
+second   line"), "first line second line");
+
+        // An ordinary prompt is returned unchanged.
+        assert_eq!(redact_kimi_prompt("重构历史扫描"), "重构历史扫描");
+    }
+
+    #[test]
+    fn kimi_fallback_title_is_redacted_end_to_end() {
+        let home = std::env::temp_dir().join("coffee-cli-test-kimi-redaction");
+        let _ = std::fs::remove_dir_all(&home);
+        let dir = home.join("session_secret");
+        write_kimi_wire(&dir, &[
+            "{\"type\":\"turn.prompt\",\"input\":[{\"type\":\"text\",\"text\":\"set token=hunter2 then go\"}],\"origin\":{\"kind\":\"user\"}}",
+        ]);
+        let title = kimi_first_user_prompt(&dir).expect("a title");
+        assert!(!title.contains("hunter2"), "got {title:?}");
+        assert_eq!(title, "set token=[redacted] then go");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     fn write_jsonl(path: &std::path::Path, lines: &[&str]) {
         use std::io::Write;
         let mut f = std::fs::File::create(path).unwrap();
