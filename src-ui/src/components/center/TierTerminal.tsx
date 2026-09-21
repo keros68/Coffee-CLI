@@ -41,6 +41,7 @@ import { usesSelfRenderedCaret } from '../../lib/chat-tools';
 import { onWindowForeground } from '../../lib/window-focus-filter';
 import { createTerminalSizeSync, DEFAULT_TERMINAL_GRID } from '../../lib/terminal-size-sync';
 import { UI_SCALE_CHANGED } from '../../lib/ui-scale';
+import { clearWebglDrawingBuffers } from '../../lib/terminal-ghost';
 import { IS_WINDOWS } from '../../lib/platform';
 import { commands } from '../../tauri';
 import { registerTerminalObserver } from '../../lib/terminal-observer';
@@ -324,6 +325,17 @@ function detachWebglRenderer(
   const webgl = webglRef.current;
   webglRef.current = null;
   try { webgl.dispose(); } catch { /* already gone */ }
+}
+
+// Drop the frames that piled up in the WebGL drawing buffer while the canvas
+// was masked or in a hidden tab, so the refresh that reveals it paints onto a
+// clean surface instead of on top of them (issues #47, #74). See
+// lib/terminal-ghost.ts for why the renderer does not clear it itself. Always
+// paired with an immediately following full refresh — on its own it would
+// blank the terminal until the next render.
+function clearGhostedFrames(container: HTMLElement | null): void {
+  if (!container) return;
+  clearWebglDrawingBuffers(container.querySelectorAll('canvas'));
 }
 
 function suspendWebglRenderer(webglRef: { current: WebglAddon | null }): void {
@@ -2009,6 +2021,7 @@ function TierTerminalImpl({
       if (!term || term.cols <= 0 || term.rows <= 0) { reveal(); return; }
       // Only a frame using the newly fitted grid may reveal the canvas.
       renderSub = term.onRender(() => reveal());
+      clearGhostedFrames(termRef.current);
       term.refresh(0, term.rows - 1);
     };
 
@@ -2063,7 +2076,12 @@ function TierTerminalImpl({
         setCanvasHidden(false);
       };
       f1 = requestAnimationFrame(() => {
-        try { if (term.rows > 0) term.refresh(0, term.rows - 1); } catch { /* Best-effort operation; failure is non-fatal. */ }
+        try {
+          if (term.rows > 0) {
+            clearGhostedFrames(termRef.current);
+            term.refresh(0, term.rows - 1);
+          }
+        } catch { /* Best-effort operation; failure is non-fatal. */ }
         renderSub = term.onRender(() => reveal());
       });
       // Same safety-net rationale as the activation effect: never strand the
