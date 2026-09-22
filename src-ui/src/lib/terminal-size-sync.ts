@@ -147,7 +147,14 @@ export function createTerminalSizeSync(
     applyMeasurement(measurement.size);
   };
 
-  const schedule = (resetMeasurementAttempts = true) => {
+  /** `immediate` measures in this task instead of after LAYOUT_SETTLE_MS. The
+   *  settle delay exists to coalesce a stream of layout events (drag-resize,
+   *  panel animation) into one fit; a tab reveal is a single event onto a
+   *  layout that is already final, and the terminal stays masked until the fit
+   *  lands, so waiting there is 100ms of blank canvas per tab switch and
+   *  nothing else. Retries inside settle() keep the delay: those wait on font
+   *  metrics that genuinely are not ready yet. */
+  const schedule = (resetMeasurementAttempts = true, immediate = false) => {
     if (disposed) return;
     const wasSuspended = suspended;
     suspended = false;
@@ -163,6 +170,10 @@ export function createTerminalSizeSync(
       retryDelay = RESIZE_RETRY_INITIAL_MS;
     }
     clearSettleTimer();
+    if (immediate) {
+      settle();
+      return;
+    }
     settleTimer = setTimeout(() => {
       settleTimer = null;
       settle();

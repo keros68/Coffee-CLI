@@ -2045,7 +2045,10 @@ function TierTerminalImpl({
     f1 = requestAnimationFrame(() => {
       xtermRef.current?.focus();
       afterFitRef.current = refreshAfterFit;
-      sizeSyncRef.current?.schedule();
+      // Measure in this frame, not after the settle delay: the canvas is
+      // masked until the fit calls refreshAfterFit, so a deferred measurement
+      // is blank screen the user reads as the tab switch being slow.
+      sizeSyncRef.current?.schedule(true, true);
     });
 
     // Safety net: never strand the canvas masked if onRender doesn't fire.
