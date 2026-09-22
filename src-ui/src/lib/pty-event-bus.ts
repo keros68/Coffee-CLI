@@ -21,12 +21,14 @@
 
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
-interface OutputEventPayload { id: string; data: string; }
+interface OutputEventPayload { id: string; data: string; at_ms?: number; }
 interface StatusEventPayload { id: string; running: boolean; exit_code: number | null; }
 interface CwdEventPayload { id: string; cwd: string; }
 interface ExitEventPayload { id: string; exit_code: number; }
 
-type OutputHandler = (data: string) => void;
+/** `atMs` is the wall-clock millis stamped by the Rust emitter, for timing
+ *  the delivery leg. Absent when the backend predates the field. */
+type OutputHandler = (data: string, atMs?: number) => void;
 type StatusHandler = (running: boolean, exitCode: number | null) => void;
 type CwdHandler = (cwd: string) => void;
 type ExitHandler = (exitCode: number) => void;
@@ -58,7 +60,7 @@ async function ensureInit(): Promise<void> {
     const registered: UnlistenFn[] = [];
     try {
       registered.push(await listen<OutputEventPayload>('tier-terminal-output', (event) => {
-        outputHandlers.get(event.payload.id)?.forEach(handler => handler(event.payload.data));
+        outputHandlers.get(event.payload.id)?.forEach(handler => handler(event.payload.data, event.payload.at_ms));
       }));
       registered.push(await listen<StatusEventPayload>('tier-terminal-status', (event) => {
         statusHandlers.get(event.payload.id)?.forEach(handler => handler(event.payload.running, event.payload.exit_code));

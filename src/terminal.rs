@@ -207,6 +207,13 @@ fn ensure_claude_theme_auto() {
 pub struct TerminalOutput {
     pub id: String,
     pub data: String,
+    /// Wall-clock millis at the moment this batch was handed to `emit`. The
+    /// frontend subtracts it from `Date.now()` to time the delivery leg:
+    /// Tauri turns every event into a JS source string that embeds the whole
+    /// chunk and eval's it in the webview, and nothing on the JS side can see
+    /// how long that took. Wall clock (not `Instant`) because the two sides
+    /// need a shared epoch.
+    pub at_ms: u64,
 }
 
 #[derive(Serialize, Clone)]
@@ -1137,6 +1144,10 @@ pub fn spawn(
                     TerminalOutput {
                         id: session_id_out.clone(),
                         data,
+                        at_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0),
                     },
                 );
 

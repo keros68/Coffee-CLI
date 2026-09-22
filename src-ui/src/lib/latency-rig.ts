@@ -20,6 +20,17 @@
 // would report the time the tab spent hidden as pipeline latency. Sampling it
 // produced a spurious 395 ms reading during ordinary tab switching.
 //
+// DELIVERY and INPUT IPC cover the legs the two frame paths cannot see. The
+// OUTPUT path starts at `onOutput`, so everything upstream of it — the Rust
+// emitter's coalesce window, Tauri's emit, the webview parsing the JS source
+// that emit builds around the chunk — is invisible to it. The INPUT path ends
+// at the next frame, which for a terminal paints nothing: a keystroke does not
+// echo itself, the agent echoes it back through the output path. So a terminal
+// that feels slow to type in can show a healthy reading on both. DELIVERY
+// times Rust-emit to JS-receipt against a shared wall clock; INPUT IPC times
+// the `tier_terminal_input` invoke, which is where a keystroke would queue if
+// output events were saturating the same IPC channel.
+//
 // MAIN THREAD is path-independent: a PerformanceObserver on 'longtask' records
 // every task that occupied the main thread for over 50 ms, whoever queued it.
 // Input and output latency say a frame was late; this says whether the thread
@@ -170,6 +181,8 @@ const inputRig = new PathRig();
 const outputRig = new PathRig();
 
 // ── Main-thread blocking (path-independent) ────────────────────────────
+const deliveryRig = new Histogram();
+const inputIpcRig = new Histogram();
 const longTasks = new Histogram();
 let longTaskMs = 0;
 let windowStart = typeof performance !== 'undefined' ? performance.now() : 0;
@@ -218,6 +231,10 @@ function dumpRig(): void {
   out += '\n── OUTPUT path (onOutput → onRender, foreground tab only) ──\n';
   out += formatLatency(outputRig.latency, 'output latency');
   out += formatCount(outputRig.coalesce, 'PTY chunks/frame', 'chunks');
+  out += '\n── DELIVERY (Rust emit → JS onOutput) ──\n';
+  out += formatLatency(deliveryRig, 'delivery latency');
+  out += '\n── INPUT IPC (keystroke → tier_terminal_input resolved) ──\n';
+  out += formatLatency(inputIpcRig, 'input IPC latency');
   out += '\n── MAIN THREAD (tasks over 50ms, any source) ──\n';
   out += formatLongTasks();
   out += '═══════════════════════════════\n';
@@ -227,6 +244,8 @@ function dumpRig(): void {
   // Reset after dump → next dump = delta since this one (Zed semantics).
   inputRig.reset();
   outputRig.reset();
+  deliveryRig.reset();
+  inputIpcRig.reset();
   longTasks.reset();
   longTaskMs = 0;
   windowStart = performance.now();
@@ -238,6 +257,16 @@ export const rig = {
   inputStart: () => {
     inputRig.start(performance.now());
     scheduleInputRaf();
+  },
+  /** Wall-clock millis between the Rust emit and this handler. Negative or
+   *  absurd values mean the two clocks disagree (clock step, suspend) and are
+   *  dropped rather than recorded as a fast or slow delivery. */
+  deliveryRecord: (ms: number) => {
+    if (ms >= 0 && ms < 10_000) deliveryRig.record(ms);
+  },
+  /** Round trip of the `tier_terminal_input` invoke for one keystroke. */
+  inputIpcRecord: (ms: number) => {
+    if (ms >= 0 && ms < 10_000) inputIpcRig.record(ms);
   },
   /** Call at the top of the onOutput handler, foreground sessions only. */
   outputStart: () => {
@@ -251,6 +280,8 @@ export const rig = {
   reset: () => {
     inputRig.reset();
     outputRig.reset();
+    deliveryRig.reset();
+    inputIpcRig.reset();
     longTasks.reset();
     longTaskMs = 0;
     windowStart = performance.now();

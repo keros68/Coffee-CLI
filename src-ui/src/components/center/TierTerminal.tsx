@@ -1048,7 +1048,13 @@ function TierTerminalImpl({
     const forwardInput = (rawData: string) => {
       const data = stripRightClickMouse(rawData);
       if (!data) return;
-      forwardTerminalInput(sessionId, data).catch(() => {});
+      // run-agent-sentinel-test.mjs extracts this handler into a bare vm sandbox:
+      // time only with what that environment provides.
+      const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+      const ipcAt = nowMs();
+      forwardTerminalInput(sessionId, data)
+        .then(() => { if (typeof rig !== 'undefined') rig.inputIpcRecord(nowMs() - ipcAt); })
+        .catch(() => {});
       if (isTerminalSubmitInput(sessionId, data)) {
         markNotifySoundPromptSubmitted(sessionId, tool);
         markAgentSubmission();
@@ -1466,8 +1472,9 @@ function TierTerminalImpl({
       // event type lives in the bus; we just register per-session handlers
       // into a Map. No N-tab fan-out on hot path.
       const unsubEvents = await subscribeTerminalEvents(sessionId, {
-        onOutput: (data) => {
+        onOutput: (data, atMs) => {
           if (!mounted) return;
+          if (atMs !== undefined) rig.deliveryRecord(Date.now() - atMs);
           // Background chunks are buffered, not written, so they have no
           // render to be timed against — see the rig header.
           if (outputScheduler.isForeground(sessionId)) rig.outputStart();
