@@ -26,21 +26,27 @@ class Renderer {
 const lifecycle = runInNewContext(ts.transpileModule(`
   let webglDisabled = false;
   ${declarations.map(node => node.getText(source)).join('\n')}
-  ({attach: attachWebglRenderer, hide: suspendWebglRenderer, close: detachWebglRenderer});
+  ({attach: attachWebglRenderer, hide: suspendWebglRenderer, close: detachWebglRenderer,
+    cap: MAX_HIDDEN_WEBGL_RENDERERS});
 `, { compilerOptions: { target: ts.ScriptTarget.ES2022 }}).outputText, {
   WebglAddon: Renderer, probeWebglOnce: () => true,
   console: { warn() {}, error() {} },
 });
 const terminal = () => ({ rows: 30, refreshes: 0, loadAddon() {}, refresh() { this.refreshes++; } });
-const a = { current: null }, b = { current: null }, c = { current: null };
+// Size the scenario from the production cap: one more terminal than the cache
+// can hold is what makes eviction observable, whatever the cap is set to.
+const total = lifecycle.cap + 1;
+const refs = Array.from({ length: total }, () => ({ current: null }));
+const [a, b] = refs;
+const c = refs[total - 1];
 const attempts = { current: 0 };
-for (const ref of [a, b, c]) lifecycle.attach(terminal(), ref, attempts);
-assert.equal(creates, 3);
+for (const ref of refs) lifecycle.attach(terminal(), ref, attempts);
+assert.equal(creates, total);
 const originalA = a.current, originalB = b.current, originalC = c.current;
-lifecycle.hide(a); lifecycle.hide(b);
+for (const ref of refs.slice(0, lifecycle.cap)) lifecycle.hide(ref);
 assert.equal(originalA.disposals, 0, 'keep recent hidden renderers warm');
 lifecycle.attach(terminal(), a, attempts);
-assert.equal(creates, 3, 'switching back reuses the existing renderer');
+assert.equal(creates, total, 'switching back reuses the existing renderer');
 lifecycle.hide(c);
 assert.equal(originalB.disposals, 0, 'a visible renderer no longer consumes hidden capacity');
 lifecycle.hide(b); // Duplicate observer notification must not change recency.

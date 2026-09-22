@@ -243,9 +243,15 @@ function probeWebglOnce(): boolean {
 // terminal trips the process-wide latch.
 const MAX_WEBGL_RECOVERY_ATTEMPTS = 3;
 
-// Retain only the two most recently hidden renderers. Switching between a few
-// tabs reuses their contexts/atlases without reserving a context for every tab.
-const MAX_HIDDEN_WEBGL_RENDERERS = 2;
+// Retain the five most recently hidden renderers instead of reserving a
+// context for every tab. Evicting a renderer is not free: the switch back runs
+// `new WebglAddon()` — a fresh GL context plus a glyph atlas rebuilt from
+// scratch, which is expensive for CJK-heavy screens — and then a full
+// `term.refresh()` repaint. That cost is exactly what the canvasHidden mask
+// below is covering, so the cache has to be deep enough that ordinary
+// back-and-forth tab switching never pays it. Five hidden + the visible ones
+// stays well inside Chromium's ~16 active-context budget.
+const MAX_HIDDEN_WEBGL_RENDERERS = 5;
 const hiddenWebglRenderers = new Set<{ current: WebglAddon | null }>();
 
 // Attach the WebGL renderer to `term`, respecting the shared context budget.
