@@ -14,7 +14,7 @@ use tauri::{AppHandle, Emitter};
 /// Set by the frontend on `document.visibilitychange`. When true, every
 /// per-session worker thread (ticker, emitter) widens its sleep / coalesce
 /// window so a Coffee CLI window left in the background drops to near-zero
-/// CPU instead of paying full 8ms / 500ms cadence forever. Apple Silicon
+/// CPU instead of paying full 16ms / 500ms cadence forever. Apple Silicon
 /// laptops in particular treat this as the difference between fan-on and
 /// idle thermal envelope.
 pub static BACKGROUND_MODE: AtomicBool = AtomicBool::new(false);
@@ -484,7 +484,7 @@ pub struct TerminalSession {
     /// FALSE so a freshly-spawned session throttles to the 200ms background
     /// cadence until the frontend's first visibility report lands — prevents
     /// a new tab (especially one opened in the background) from blasting
-    /// ~125 emits/sec at the 8ms foreground cadence before visibility is
+    /// ~63 emits/sec at the 16ms foreground cadence before visibility is
     /// confirmed. The observer fires within a frame or two for a genuinely
     /// visible tab, so the visible-tab throttled window is tiny.
     pub is_tab_active: Arc<AtomicBool>,
@@ -889,8 +889,8 @@ pub fn spawn(
 
     // Defaults INACTIVE: a freshly-spawned tab emits at the 200ms background
     // cadence until the frontend's IntersectionObserver confirms it's visible
-    // (set_session_active(true)). Prevents a new tab from blasting ~125
-    // emits/sec at the 8ms foreground cadence before visibility is confirmed —
+    // (set_session_active(true)). Prevents a new tab from blasting ~63
+    // emits/sec at the 16ms foreground cadence before visibility is confirmed —
     // the observer fires within a frame or two for a genuinely visible tab, so
     // the visible-tab window is tiny, but a tab opened in the background stays
     // safely throttled instead of defaulting into the fg cadence. See
@@ -952,7 +952,7 @@ pub fn spawn(
     //              Zero mutexes on the hot loop. EOF/error drops tx, which
     //              signals the emitter to drain + clean up.
     //
-    //   Emitter  : pulls from the channel, accumulates up to an ~8 ms window
+    //   Emitter  : pulls from the channel, accumulates up to a one-frame window
     //              (imperceptible to users, collapses AI-CLI token bursts),
     //              then runs ANSI strip + OSC 7 detect +
     //              session-token capture + IPC emit + ring-buffer push
@@ -1007,15 +1007,22 @@ pub fn spawn(
         use std::sync::mpsc::RecvTimeoutError;
         use std::time::Duration as StdDuration;
 
-        // 8 ms is below human-perceptible latency (~16 ms frame) but large
-        // enough to collapse a typical AI-CLI token-stream burst (hundreds of
-        // small writes) into a single emit. Widen to 200 ms whenever nobody
-        // can see this output right now — either the whole Coffee CLI window
-        // is hidden (BACKGROUND_MODE), or this session's own tab isn't the
-        // one on screen (is_tab_active, e.g. a background tab while the
-        // window itself stays focused). Both cases stop paying full 8 ms
-        // parse+emit cadence for a stream nobody is watching.
-        const FLUSH_INTERVAL_FG: StdDuration = StdDuration::from_millis(8);
+        // 16 ms is one display frame: the frontend cannot show two emits
+        // landing inside the same frame as separate updates, so a tighter
+        // window buys no visible smoothness and costs real main-thread time.
+        // Tauri's `emit` delivers every event by building a JS source string
+        // that embeds the whole chunk and eval-ing it in the WebView (see
+        // tauri::event::emit_js_script), so each emit makes the WebView parse
+        // fresh JavaScript on the same thread that handles keystrokes and IME
+        // composition. One emit per frame keeps that cost bounded while still
+        // collapsing a typical AI-CLI token-stream burst (hundreds of small
+        // writes) into a single emit. Widen to 200 ms whenever nobody can see
+        // this output right now — either the whole Coffee CLI window is hidden
+        // (BACKGROUND_MODE), or this session's own tab isn't the one on screen
+        // (is_tab_active, e.g. a background tab while the window itself stays
+        // focused). Both cases stop paying full foreground parse+emit cadence
+        // for a stream nobody is watching.
+        const FLUSH_INTERVAL_FG: StdDuration = StdDuration::from_millis(16);
         const FLUSH_INTERVAL_BG: StdDuration = StdDuration::from_millis(200);
         let flush_interval = || {
             if BACKGROUND_MODE.load(Ordering::Relaxed)

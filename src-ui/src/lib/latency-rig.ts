@@ -9,7 +9,7 @@
 // release build (can't easily switch to dev mid-session), so the rig must
 // be measurable on any build — incl. a release installer on another
 // machine. Cost is near-zero: ~3 performance.now() calls + bounded
-// ring-buffer writes per terminal event (events arrive at most every ~8ms
+// ring-buffer writes per terminal event (events arrive at most every ~16ms
 // due to Rust-side batching in src/terminal.rs), plus four 20k-sample
 // Float64 ring buffers (~640 KB). No telemetry — dumps are local only
 // (clipboard + console.log).
