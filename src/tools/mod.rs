@@ -276,7 +276,7 @@ pub struct ToolInfo {
     pub display_name: &'static str,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_tools() -> Vec<ToolInfo> {
     TOOLS
         .iter()

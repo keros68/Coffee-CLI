@@ -297,7 +297,7 @@ fn join_abs(repo_root: &str, rel: &str) -> String {
 
 /// List the active folder's git working-tree changes. The frontend refreshes
 /// it from filesystem events plus a low-frequency polling backstop.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_changes(folder: String) -> GitChanges {
     if !git_on_path() {
         return GitChanges::NoGit;
@@ -418,7 +418,7 @@ pub fn git_changes(folder: String) -> GitChanges {
 ///   • unstaged tracked: old = `:rel` (index)   new = working file on disk
 ///   • staged   tracked: old = `HEAD:rel`        new = `:rel` (index)
 ///   • untracked:        old = ""                new = working file on disk
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_show_file(repo_root: String, spec: String) -> Option<String> {
     // Defense against arg-injection: `spec` is frontend-built (HEAD:rel,
     // <hash>:rel, :rel). Reject a leading '-' so a crafted commitHash can't

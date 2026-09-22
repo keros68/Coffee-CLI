@@ -260,7 +260,7 @@ pub(crate) fn check_tool_unix(bin: &str) -> bool {
 /// flips a CLI from not-installed → installed, so users who install a
 /// CLI while Coffee CLI is running also get the OpenCode-family transparent
 /// theme migration without restarting. Idempotent.
-#[tauri::command]
+#[tauri::command(async)]
 fn maintain_tool_integration(tool: String) {
     crate::hook_installer::maintain_for_tool(&tool);
 }
@@ -274,7 +274,7 @@ fn take_pending_launch(state: State<'_, AppState>) -> Option<crate::launch::Laun
     state.pending_launch.lock().ok()?.take()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn check_tools_installed() -> std::collections::HashMap<String, bool> {
     let mut result = std::collections::HashMap::new();
     for tool in crate::tools::TOOLS {
@@ -291,7 +291,7 @@ fn check_tools_installed() -> std::collections::HashMap<String, bool> {
 /// Bash card when Git for Windows isn't installed, etc.). Cheap — a few
 /// `where`/`exists` checks — safe to call on settings open. See
 /// `shell_probe::detect_capabilities` for the per-shell strategy.
-#[tauri::command]
+#[tauri::command(async)]
 fn detect_shells() -> crate::shell_probe::ShellCapabilitiesJson {
     let mut caps = crate::shell_probe::detect_capabilities();
     // Exact versions are probed here (Settings open), not in
@@ -307,7 +307,7 @@ fn detect_shells() -> crate::shell_probe::ShellCapabilitiesJson {
 // made by external tools (terminal CLIs, editors, git, etc.) propagate
 // into the Explorer tree immediately. See fs_watcher.rs for mechanics.
 
-#[tauri::command]
+#[tauri::command(async)]
 fn start_fs_watcher(
     path: String,
     app: tauri::AppHandle,
@@ -321,7 +321,7 @@ fn start_fs_watcher(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn stop_fs_watcher(state: State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.fs_watcher.lock().map_err(|e| format!("lock: {}", e))?;
     // Drop releases the OS watcher handle.
@@ -342,7 +342,7 @@ struct DirEntry {
 
 /// List the immediate children of a directory.
 /// Returns files and subdirectories sorted: directories first, then files, both alphabetical.
-#[tauri::command]
+#[tauri::command(async)]
 fn list_directory(path: String) -> Result<Vec<DirEntry>, String> {
     let dir = std::path::Path::new(&path);
     if !dir.is_dir() {
@@ -420,7 +420,7 @@ pub(crate) fn normalize_path_key(path: &str) -> String {
 /// exist, can't be read, or fails the text-vs-binary heuristic. Pairs with
 /// `get_baseline_content` to feed the right-side Diff panel: baseline +
 /// current = both sides of the diff.
-#[tauri::command]
+#[tauri::command(async)]
 fn read_text_file(path: String) -> Option<String> {
     let bytes = std::fs::read(&path).ok()?;
     if !stats_is_text(&bytes) { return None; }
@@ -571,7 +571,7 @@ async fn read_clipboard_image(app: tauri::AppHandle) -> Result<Option<String>, S
 // ─── File System Operations ───────────────────────────────────────────────────
 
 /// Open the native file explorer and highlight / reveal the given path.
-#[tauri::command]
+#[tauri::command(async)]
 fn show_in_folder(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -1143,7 +1143,7 @@ fn set_session_active(session_id: String, active: bool, state: State<'_, AppStat
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn tier_terminal_kill(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let map = state.terminal_session.lock().unwrap();
     if let Some(session) = map.get(&session_id) {
@@ -1152,7 +1152,7 @@ fn tier_terminal_kill(session_id: String, state: State<'_, AppState>) -> Result<
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn tier_terminal_resize(
     session_id: String,
     cols: u16,
@@ -1199,7 +1199,7 @@ struct SavedSession {
     turn_count: Option<u32>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_terminal_session_token(
     session_id: String,
     state: State<'_, AppState>,
@@ -5506,7 +5506,7 @@ fn tasks_file_path() -> PathBuf {
     dir.join("tasks.json")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn load_tasks() -> Result<String, String> {
     let path = tasks_file_path();
     if path.exists() {
@@ -5547,7 +5547,7 @@ fn save_password(host: String, username: String, password: String) -> Result<(),
 
 /// Load a previously saved password from the OS keychain.
 /// Returns `None` if no entry exists (user hasn't saved one yet).
-#[tauri::command]
+#[tauri::command(async)]
 fn load_password(host: String, username: String) -> Result<Option<String>, String> {
     let account = format!("{}@{}", username, host);
     match keyring::Entry::new(KEYRING_SERVICE, &account)
@@ -5598,7 +5598,7 @@ async fn check_network_port(host: String, port: u16) -> Result<bool, String> {
     Ok(reachable)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn open_url(url: String) -> Result<(), String> {
     if url.is_empty() || url.starts_with('-') || url.contains('\0') {
         return Err("Invalid URL or file path".into());
@@ -5772,12 +5772,12 @@ fn run_self_update(app: &tauri::AppHandle, url: &str) -> Result<(), String> {
 // installer was supposed to handle by auto-detection — defer to the
 // user, who knows their machine better than we do.
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_tool_config(tool: String) -> crate::tool_config::ToolConfigEntry {
     crate::tool_config::get(&tool)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_all_tool_configs() -> crate::tool_config::ToolConfig {
     crate::tool_config::load()
 }
