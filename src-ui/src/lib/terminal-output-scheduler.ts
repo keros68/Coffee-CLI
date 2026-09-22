@@ -99,6 +99,20 @@ export function enqueue(id: string, data: string): void {
   scheduleDrain();
 }
 
+/** True while this session is the one on screen, i.e. `enqueue` writes its
+ *  chunks straight through instead of buffering them. The latency rig reads
+ *  this to decide whether an output sample is measurable: a chunk that lands
+ *  in the background queue is not rendered until the tab is revealed, so
+ *  timing it to the next render would report how long the tab stayed hidden,
+ *  not how long the pipeline took. */
+export function isForeground(id: string): boolean {
+  return sessions.get(id)?.isActive ?? false;
+}
+
+/** Flip a session between foreground (immediate write) and background
+ *  (buffered drain). Activation only changes scheduling priority — the
+ *  bounded per-session write keeps a backlog accumulated while hidden from
+ *  blocking the terminal on switch-back. */
 export function setActive(id: string, active: boolean): void {
   const q = sessions.get(id);
   if (!q) return;

@@ -1291,7 +1291,9 @@ function TierTerminalImpl({
     // signal (better than rAF approximation). Always-on (see latency-rig.ts
     // header); near-zero cost — one performance.now() + bounded ring-buffer
     // write per render, no-ops when no output armed this frame.
-    term.onRender(() => rig.outputRenderEnd());
+    term.onRender(() => {
+      if (outputScheduler.isForeground(sessionId)) rig.outputRenderEnd();
+    });
     // Each enhanced agent owns its real PTY and TUI. After xterm has applied
     // ANSI cursor movement and redraws, read the rendered screen once and feed
     // both the precise interaction card and the Dynamic Island state machine.
@@ -1466,7 +1468,9 @@ function TierTerminalImpl({
       const unsubEvents = await subscribeTerminalEvents(sessionId, {
         onOutput: (data) => {
           if (!mounted) return;
-          rig.outputStart();
+          // Background chunks are buffered, not written, so they have no
+          // render to be timed against — see the rig header.
+          if (outputScheduler.isForeground(sessionId)) rig.outputStart();
           hasOutputRef.current = true;
           outputBytesRef.current += data.length;
           lastOutputAtRef.current = Date.now();

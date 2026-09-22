@@ -14,6 +14,18 @@
 // Float64 ring buffers (~640 KB). No telemetry — dumps are local only
 // (clipboard + console.log).
 //
+// The OUTPUT path only samples the FOREGROUND session (outputScheduler's
+// `isForeground`). A chunk delivered to a hidden tab is buffered, not written,
+// so it is not rendered until that tab is revealed — arming the rig on it
+// would report the time the tab spent hidden as pipeline latency. Sampling it
+// produced a spurious 395 ms reading during ordinary tab switching.
+//
+// MAIN THREAD is path-independent: a PerformanceObserver on 'longtask' records
+// every task that occupied the main thread for over 50 ms, whoever queued it.
+// Input and output latency say a frame was late; this says whether the thread
+// was blocked at all, which separates "our JS is too slow" from a stall
+// further down in the compositor, the GPU or the IPC.
+//
 // Two paths, each Zed-shaped (latency distribution + per-frame coalesce):
 //   INPUT  : keydown (attachCustomKeyEventHandler, TierTerminal.tsx:680)
 //            → next requestAnimationFrame   [= Zed's dispatch_event → present]
@@ -157,6 +169,36 @@ class PathRig {
 const inputRig = new PathRig();
 const outputRig = new PathRig();
 
+// ── Main-thread blocking (path-independent) ────────────────────────────
+const longTasks = new Histogram();
+let longTaskMs = 0;
+let windowStart = typeof performance !== 'undefined' ? performance.now() : 0;
+if (typeof PerformanceObserver !== 'undefined') {
+  try {
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        longTasks.record(entry.duration);
+        longTaskMs += entry.duration;
+      }
+    }).observe({ type: 'longtask', buffered: true });
+  } catch { /* longtask unsupported — the section reports no samples */ }
+}
+
+function formatLongTasks(): string {
+  const elapsed = performance.now() - windowStart;
+  if (longTasks.isEmpty) {
+    return `  no task over 50ms in ${(elapsed / 1000).toFixed(1)}s of wall clock`
+      + ` \u2014 the main thread was never blocked\n`;
+  }
+  const share = elapsed > 0 ? (longTaskMs / elapsed) * 100 : 0;
+  let out = `  ${longTasks.count} blocking tasks, ${longTaskMs.toFixed(0)}ms total`
+    + ` over ${(elapsed / 1000).toFixed(1)}s of wall clock (${share.toFixed(1)}% blocked)\n`;
+  for (const { label, q } of PERCENTILES) {
+    out += `    ${label}: ${longTasks.percentile(q).toFixed(2).padStart(8)}ms\n`;
+  }
+  return out;
+}
+
 // ── Input frame end: one rAF per frame that had input (first-input arms it) ──
 let inputRafScheduled = false;
 function scheduleInputRaf(): void {
@@ -173,9 +215,11 @@ function dumpRig(): void {
   out += '\n── INPUT path (keydown → rAF) ──\n';
   out += formatLatency(inputRig.latency, 'input latency');
   out += formatCount(inputRig.coalesce, 'keys coalesced/frame', 'events');
-  out += '\n── OUTPUT path (onOutput → onRender) ──\n';
+  out += '\n── OUTPUT path (onOutput → onRender, foreground tab only) ──\n';
   out += formatLatency(outputRig.latency, 'output latency');
   out += formatCount(outputRig.coalesce, 'PTY chunks/frame', 'chunks');
+  out += '\n── MAIN THREAD (tasks over 50ms, any source) ──\n';
+  out += formatLongTasks();
   out += '═══════════════════════════════\n';
   // Console (devtools, dev) + clipboard (visible in release builds w/o devtools).
   console.log(out);
@@ -183,6 +227,9 @@ function dumpRig(): void {
   // Reset after dump → next dump = delta since this one (Zed semantics).
   inputRig.reset();
   outputRig.reset();
+  longTasks.reset();
+  longTaskMs = 0;
+  windowStart = performance.now();
 }
 
 /** Public API. Always-on (see header) — near-zero cost, no telemetry. */
@@ -192,7 +239,7 @@ export const rig = {
     inputRig.start(performance.now());
     scheduleInputRaf();
   },
-  /** Call at the top of the onOutput handler. */
+  /** Call at the top of the onOutput handler, foreground sessions only. */
   outputStart: () => {
     outputRig.start(performance.now());
   },
@@ -201,7 +248,13 @@ export const rig = {
     outputRig.stop(performance.now());
   },
   dump: dumpRig,
-  reset: () => { inputRig.reset(); outputRig.reset(); },
+  reset: () => {
+    inputRig.reset();
+    outputRig.reset();
+    longTasks.reset();
+    longTaskMs = 0;
+    windowStart = performance.now();
+  },
 };
 
 // Expose on window for devtools + a shortcut so the report can be triggered
