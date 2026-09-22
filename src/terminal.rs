@@ -1056,6 +1056,10 @@ pub fn spawn(
         let mut pending: Vec<u8> = Vec::with_capacity(131072);
         let mut token_captured = false;
         let mut last_flush = Instant::now();
+        // True while nothing is buffered and nothing has arrived for a whole
+        // interval, i.e. the stream is quiet. The next chunk to arrive then
+        // goes out with no delay — see `should_flush`.
+        let mut idle = true;
 
         loop {
             let interval = flush_interval();
@@ -1076,10 +1080,20 @@ pub fn spawn(
             // the next recv_timeout blocks for a full interval.
             if pending.is_empty() {
                 last_flush = Instant::now();
+                idle = true;
             }
 
+            // `idle` is the interactive case. A keystroke echo is one repaint
+            // arriving into a quiet stream, and coalescing a burst of one buys
+            // nothing — it only holds the character off the screen for the
+            // whole window. Without this the idle reset above made that the
+            // worst case rather than the best one: every echo waited a full
+            // interval, because the reset had just moved `last_flush` to now.
+            // Coalescing still applies to everything that follows, so a real
+            // output stream is batched exactly as before.
             let should_flush = !pending.is_empty()
                 && (disconnected
+                    || idle
                     || pending.len() >= MAX_PENDING
                     || last_flush.elapsed() >= interval);
 
@@ -1167,6 +1181,7 @@ pub fn spawn(
                 // correctly when the rest arrives.
                 pending.drain(..valid_end);
                 last_flush = Instant::now();
+                idle = false;
             }
 
             if disconnected {
