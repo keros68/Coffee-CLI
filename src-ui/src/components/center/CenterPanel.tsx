@@ -1392,7 +1392,7 @@ export function CenterPanel() {
               onPointerDown={(e) => onTabPointerDown(e, session.id)}
             >
               {icon}
-              <span className="tab-title" style={{ flex: '0 1 auto', minWidth: 0, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>{title}</span>
+              <span className="tab-title" style={{ flex: '1 1 auto', minWidth: 0, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>{title}</span>
               <div className={`tab-actions${showAgentStatus ? '' : ' tab-actions--close-only'}`}>
                 {showAgentStatus && (
                   <div className={`tab-status-grid status-${
@@ -1444,7 +1444,7 @@ export function CenterPanel() {
               <line x1="8" y1="13" x2="16" y2="13"/>
               <line x1="8" y1="17" x2="16" y2="17"/>
             </svg>
-            <span className="tab-title" style={{ flex: '0 1 auto', minWidth: 0, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>{diffTabTitle}</span>
+            <span className="tab-title" style={{ flex: '1 1 auto', minWidth: 0, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>{diffTabTitle}</span>
             <div className="tab-actions tab-actions--close-only">
               <button
                 className="tab-close-btn"

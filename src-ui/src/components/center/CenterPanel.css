@@ -37,8 +37,10 @@
   border-radius: var(--shape-radius-tab);
   cursor: pointer;
   user-select: none;
-  flex: 0 1 auto;
-  max-width: 200px;
+  /* Fixed width regardless of title length, so short-named tabs stay easy to
+     hit; tabs shrink evenly when the strip runs out of room. */
+  flex: 0 1 200px;
+  width: 200px;
   min-width: 0;
   /* `transform` is part of the transition so siblings ease into their
    * shifted positions when another tab is being dragged past them
