@@ -3790,6 +3790,21 @@ fn kimi_first_user_prompt(session_dir: &std::path::Path) -> Option<String> {
     None
 }
 
+/// Title a user-side hook wrote to `<sessionDir>/coffee-title.txt`. Kimi hooks
+/// cannot set a session title, and Kimi rewrites `state.json` from memory on
+/// every update, so an externally generated title lives beside it instead and
+/// wins over Kimi's own prompt-derived one. First line only, bounded read.
+fn kimi_sidecar_title(session_dir: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    const MAX_BYTES: u64 = 1024;
+    let file = std::fs::File::open(session_dir.join("coffee-title.txt")).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES).read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let title = redact_kimi_prompt(text.lines().next().unwrap_or("").trim_start_matches('\u{feff}'));
+    if title.is_empty() { None } else { Some(title) }
+}
+
 /// Mirror of Kimi Code's own prompt-metadata scrubbing
 /// (`agent-core-v2/src/agent/prompt/promptMetadataText.ts`). The CLI runs a
 /// prompt through this before it ever reaches `lastPrompt` or a title, so a
@@ -3867,11 +3882,14 @@ fn find_kimi_sessions(home: &std::path::Path, result: &mut Vec<SavedSession>) {
         let Ok(state_bytes) = std::fs::read_to_string(session_dir.join("state.json")) else { continue };
         let Ok(state) = serde_json::from_str::<serde_json::Value>(&state_bytes) else { continue };
 
-        let title = state
-            .get("title").and_then(|x| x.as_str()).filter(|s| !s.is_empty())
-            .or_else(|| state.get("lastPrompt").and_then(|x| x.as_str()))
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
+        let title = kimi_sidecar_title(session_dir)
+            .or_else(|| {
+                state
+                    .get("title").and_then(|x| x.as_str()).filter(|s| !s.is_empty())
+                    .or_else(|| state.get("lastPrompt").and_then(|x| x.as_str()))
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
             // Kimi titles a session only after it has generated one; until
             // then fall back to what the user typed, the same way every other
             // tool's parser names an untitled session.
@@ -6934,6 +6952,21 @@ second   line"), "first line second line");
         assert!(!title.contains("hunter2"), "got {title:?}");
         assert_eq!(title, "set token=[redacted] then go");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn kimi_sidecar_title_reads_the_first_line() {
+        let dir = std::env::temp_dir().join("coffee-cli-test-kimi-sidecar");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(kimi_sidecar_title(&dir), None, "no sidecar, no title");
+
+        std::fs::write(dir.join("coffee-title.txt"), "\u{feff}TOML｜掌握数组表语法\nignored\n").unwrap();
+        assert_eq!(kimi_sidecar_title(&dir).as_deref(), Some("TOML｜掌握数组表语法"));
+
+        std::fs::write(dir.join("coffee-title.txt"), "  \n").unwrap();
+        assert_eq!(kimi_sidecar_title(&dir), None, "a blank sidecar falls through");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn write_jsonl(path: &std::path::Path, lines: &[&str]) {
