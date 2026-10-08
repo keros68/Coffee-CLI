@@ -3082,7 +3082,13 @@ mod orca_cleanup_tests {
         assert!(plugin.exists());
         assert!(nested_plugin.exists());
         assert!(pyc.exists());
-        assert!(links.iter().all(|link| link.exists()));
+        // Symlink metadata, not exists(): reading through the link is what
+        // must not be needed here, and Windows 25H2 denies it outright for
+        // mount points created by unelevated callers (os error 448, untrusted
+        // mount point). Survival of the link itself is the assertion.
+        assert!(links
+            .iter()
+            .all(|link| fs::symlink_metadata(link).is_ok()));
         let _ = fs::remove_dir_all(dir);
     }
 

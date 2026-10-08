@@ -263,6 +263,20 @@ fn history_walk_follows_directory_links_with_a_depth_limit() {
             .creation_flags(0x0800_0000).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     }
+    #[cfg(windows)]
+    if let Err(e) = std::fs::read_dir(&link) {
+        // Windows 25H2 denies traversal of mount points created by unelevated
+        // callers (os error 448, untrusted mount point), and then the
+        // follow-the-link half of this test cannot run there — the junction
+        // itself, and the depth-limit guard around it, still get exercised on
+        // systems without that enforcement.
+        if e.raw_os_error() == Some(448) {
+            eprintln!("skipping: junction traversal blocked by mount-point trust (os error 448)");
+            std::fs::remove_dir(&link).unwrap();
+            let _ = std::fs::remove_dir_all(directory);
+            return;
+        }
+    }
     let mut found = Vec::new();
     collect_jsonl_paths_with_mtime(root.clone(), 2, "codex", &mut found);
     assert_eq!(found.len(), 1);
