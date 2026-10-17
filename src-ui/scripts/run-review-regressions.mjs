@@ -567,7 +567,7 @@ console.log('OK: actual tool-card folder selection uses the same launch action a
   const agentConversations = [{
     id: 'coffee-history', route: 'weixin-bound', source: '微信', title: 'hello', updatedAt: newest, messageCount: 2,
   }];
-  const sortByMtime = evaluate(`${declaration('lib/history-cache.ts', 'sortByMtime').replace(/^export\s+/, '')}; sortByMtime`);
+  const sortByMtime = evaluate(`${declaration('lib/history-cache.ts', 'savedAtMs').replace(/^export\s+/, '')}\n${declaration('lib/history-cache.ts', 'sortByMtime').replace(/^export\s+/, '')}; sortByMtime`);
   const merged = evaluate(merge, { useMemo: callback => callback(), nativeSessions, agentConversations, sortByMtime });
   assert.equal(merged[0].id, 'coffee-history', 'the newest Agent conversation must lead mixed timestamp histories');
   assert.equal(merged.slice(0, 30).some(session => session.id === 'coffee-history'), true, 'Agent history must appear on the first visible page');
@@ -578,7 +578,7 @@ console.log('OK: actual tool-card folder selection uses the same launch action a
   assert.equal(coffee.session_token, null);
   const allHistories = evaluate(filter, {
     useMemo: callback => callback(), baseSessions: merged, hidden: new Set(), pinned: new Set(),
-    activeProject: null, debouncedQuery: '', renamed: {}, agentConversations,
+    activeProject: null, debouncedQuery: '', renamed: {}, autoNamed: {}, autoNameOn: true, agentConversations,
     projectName: () => '', getToolName: tool => tool,
   });
   assert.equal(allHistories.length, 38);
@@ -595,7 +595,7 @@ console.log('OK: actual tool-card folder selection uses the same launch action a
   assert.deepEqual(actions.slice(1).map(action => action.type), ['ADD_TERMINAL', 'SET_ACTIVE_TERMINAL']);
   const filtered = evaluate(filter, {
     useMemo: callback => callback(), baseSessions: [coffee], hidden: new Set(), pinned: new Set(),
-    activeProject: 'coffee-agent', debouncedQuery: 'Coffee Agent', renamed: {},
+    activeProject: 'coffee-agent', debouncedQuery: 'Coffee Agent', renamed: {}, autoNamed: {}, autoNameOn: true,
     agentConversations: [{ id: coffee.id, source: '微信' }],
     projectName: () => '', getToolName: tool => tool,
   });

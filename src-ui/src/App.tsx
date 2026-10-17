@@ -6,6 +6,7 @@ import { retryInvoke } from './tauri';
 import { initNotifySound } from './lib/notify-sound';
 import { routeFileDrop } from './lib/file-drop';
 import { initHistoryAutoRefresh } from './lib/history-cache';
+import { initSessionAutoName } from './lib/session-autoname';
 import { isFrostShape, resolveThemeMode } from './lib/personalization';
 import { useDataAttr } from './lib/use-data-attr';
 import { TitleBar } from './components/common/TitleBar';
@@ -477,6 +478,12 @@ export function App() {
   // (prefetchHistory flips status to 'ready'), so users who never open it
   // pay only the 60s setInterval tick (a function call that early-returns).
   useEffect(() => initHistoryAutoRefresh(), []);
+
+  // Auto-generated session titles (`项目｜目标`). Subscribes to the same history
+  // store: a session that has been quiet for a while is a finished first turn,
+  // so it gets named once and then stays frozen (see lib/session-autoname.ts).
+  // No-ops outside Tauri and while the Settings ▸ Sessions toggle is off.
+  useEffect(() => initSessionAutoName(), []);
 
   return (
     <>

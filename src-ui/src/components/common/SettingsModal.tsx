@@ -12,9 +12,11 @@
 // Dispatch + persistence mirror the former Explorer wiring exactly so behaviour
 // is unchanged; only the presentation moved.
 
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react';
 import { useAppState, useAppDispatch, HOTKEY_SCHEMES, type HotkeyScheme, type TitlebarToggleDisplay, type ThemeColor, type ThemeMode, type ThemeShape, type IconTheme } from '../../store/app-state';
 import { playNotifySound } from '../../lib/notify-sound';
+import { runAutoNamePass, setAutoNameEnabled, subscribeAutoNameEnabled, getAutoNameEnabledSnapshot } from '../../lib/session-autoname';
+import { getHistorySnapshot } from '../../lib/history-cache';
 import { useT } from '../../i18n/useT';
 import { IS_MACOS, IS_WINDOWS } from '../../lib/platform';
 import { TERM_COLOR_SCHEMES } from '../center/TierTerminal';
@@ -25,7 +27,7 @@ import { setUiScale, useUiScale } from '../../lib/ui-scale';
 import { THEME_COLORS, THEME_MODES, THEME_SHAPES, ICON_ART_THEMES, LANGUAGES, TASK_VIEW_MODES, isMaskTintTheme } from '../../lib/personalization';
 import './SettingsModal.css';
 
-type Section = 'general' | 'appearance' | 'wallpaper' | 'terminal' | 'gambit' | 'sound' | 'language' | 'feedback';
+type Section = 'general' | 'appearance' | 'wallpaper' | 'terminal' | 'gambit' | 'sound' | 'sessions' | 'language' | 'feedback';
 
 // Trailing "opens outside the app" affordance on the feedback cards.
 const ExternalLinkArrow = () => (
@@ -105,6 +107,12 @@ const ICONS: Record<Section, ReactNode> = {
       <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" /><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
     </svg>
   ),
+  sessions: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h13a2 2 0 0 1 2 2z" />
+      <path d="M9 9h7" /><path d="M9 13h4" />
+    </svg>
+  ),
   feedback: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="m8 2 1.88 1.88" /><path d="M14.12 3.88 16 2" />
@@ -146,6 +154,9 @@ export function SettingsModal() {
   // `if (!open) return null` early-return — hooks can't run conditionally.
   const [soundDone, setSoundDone] = useState(() => readSoundPref('cc-sound-done'));
   const [soundWait, setSoundWait] = useState(() => readSoundPref('cc-sound-wait'));
+  // Session auto-naming toggle (Settings ▸ Sessions). Read from the shared pref
+  // store, declared above the early return like the sound ones.
+  const autoName = useSyncExternalStore(subscribeAutoNameEnabled, getAutoNameEnabledSnapshot);
 
   const open = state.settingsOpen;
   const close = () => { finishScaleDrag(); dispatch({ type: 'SET_SETTINGS_OPEN', open: false }); };
@@ -262,6 +273,15 @@ export function SettingsModal() {
   const setSoundDonePref = writeSoundPref('cc-sound-done', setSoundDone);
   const setSoundWaitPref = writeSoundPref('cc-sound-wait', setSoundWait);
 
+  // Session auto-naming (Settings ▸ Sessions). Off = generated titles are hidden
+  // and no new ones are written (see lib/session-autoname.ts); the stored names
+  // stay. Turning it back on runs a pass now instead of waiting for the next
+  // 60s history poll, so the effect shows right away.
+  const setAutoNamePref = (value: boolean) => {
+    setAutoNameEnabled(value);
+    if (value) runAutoNamePass(getHistorySnapshot().sessions);
+  };
+
   const hasBg = state.bgType !== 'none' && state.bgPath !== '';
   const modKey = IS_MACOS ? '⌘' : 'Ctrl';
 
@@ -272,6 +292,7 @@ export function SettingsModal() {
     { id: 'terminal',   label: t('settings.terminal') },
     { id: 'gambit',     label: t('settings.gambit') },
     { id: 'sound',      label: t('settings.sound') },
+    { id: 'sessions',   label: t('settings.sessions') },
     { id: 'language',   label: t('settings.language') },
     { id: 'feedback',   label: t('settings.feedback') },
   ];
@@ -667,6 +688,31 @@ export function SettingsModal() {
                     </div>
                   </div>
                 ))}
+              </>
+            )}
+
+            {section === 'sessions' && (
+              <>
+                <div className="settings-section-label">{t('settings.sessions.autoname')}</div>
+                <div className="settings-key-row">
+                  <button
+                    className={`settings-key-card${autoName ? ' active' : ''}`}
+                    onClick={() => setAutoNamePref(true)}
+                    aria-pressed={autoName}
+                  >
+                    <span className="settings-key-combo">{t('settings.sound.on')}</span>
+                  </button>
+                  <button
+                    className={`settings-key-card${!autoName ? ' active' : ''}`}
+                    onClick={() => setAutoNamePref(false)}
+                    aria-pressed={!autoName}
+                  >
+                    <span className="settings-key-combo">{t('settings.sound.off')}</span>
+                  </button>
+                </div>
+                <div className="settings-key-sub" style={{ marginTop: 8 }}>
+                  {t('settings.sessions.autoname.sub')}
+                </div>
               </>
             )}
 

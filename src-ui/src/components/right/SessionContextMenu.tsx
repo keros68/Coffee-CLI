@@ -4,9 +4,10 @@
 // `.ctx-menu-item` / `.ctx-menu-divider` classes (defined in Explorer.css,
 // already theme-aware incl. glass/carbon overrides + in the glass/carbon
 // nuclear `:not()` allowlist). Positioning, portal, and dismiss logic mirror
-// Explorer.tsx's `ContextMenu`. Items are session-specific (pin, rename, section
-// membership, copy ID / resume command / full path, reveal in folder, delete)
-// - NOT the file-system actions the Explorer menu hardcodes.
+// Explorer.tsx's `ContextMenu`. Items are session-specific - pin, rename (plus
+// the two resets back to a generated or original title), section membership,
+// copy ID / resume command / full path, reveal in folder, delete - NOT the
+// file-system actions the Explorer menu hardcodes.
 
 import { useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
@@ -16,6 +17,8 @@ import { commands } from '../../tauri';
 import { clipboardWrite } from '../../lib/clipboard';
 import { hideSession } from '../../lib/hidden-sessions';
 import { togglePin, isPinned } from '../../lib/pinned-sessions';
+import { getCustomName, setCustomName } from '../../lib/renamed-sessions';
+import { hasAutoName, optOutAutoName } from '../../lib/auto-named-sessions';
 import { getToolDisplayName } from '../../lib/tool-info';
 import {
   getGroupsSnapshot,
@@ -93,10 +96,22 @@ export function SessionContextMenu({ menu, onClose, onRename }: { menu: SessionC
   const hasPath = !!filePath;
   const hasGroup2 = hasToken || hasPath; // resume implies token, so this covers it
   const pinned = isPinned(session.tool ?? '', session.id);
+  // Title layers, for the two reset actions below. A custom name can always be
+  // cleared (revealing the generated or original title); the original title is
+  // only reachable once a generated name exists, because opting out of auto
+  // naming is what makes it stick.
+  const customName = getCustomName(session.tool ?? '', session.id);
+  const autoNamed = hasAutoName(session.tool ?? '', session.id);
 
   const copy = (text: string) => { clipboardWrite(text); onClose(); };
   const handlePin = () => { togglePin(session.tool ?? '', session.id); onClose(); };
   const handleRename = () => { onRename(session); onClose(); };
+  const handleClearCustomName = () => { setCustomName(session.tool ?? '', session.id, null); onClose(); };
+  const handleUseOriginalName = () => {
+    setCustomName(session.tool ?? '', session.id, null);
+    if (autoNamed) optOutAutoName(session.tool ?? '', session.id);
+    onClose();
+  };
   const handleDelete = () => { hideSession(session.tool ?? '', session.id); onClose(); };
   const handleShowInFolder = async () => {
     onClose();
@@ -108,7 +123,7 @@ export function SessionContextMenu({ menu, onClose, onRename }: { menu: SessionC
   // section items make the menu variable-height, so it caps at a scrollable
   // height instead of running off the window.
   const MENU_WIDTH = 220;
-  const MENU_HEIGHT = 400; // pin, rename, sections, 3 copy, delete
+  const MENU_HEIGHT = 460; // pin · rename · reset · sections · 3 copy · delete
   const isBottomOverflow = menu.y + MENU_HEIGHT > window.innerHeight;
   const isRightOverflow = menu.x + MENU_WIDTH > window.innerWidth;
   const style: React.CSSProperties = {
@@ -135,6 +150,24 @@ export function SessionContextMenu({ menu, onClose, onRename }: { menu: SessionC
         </svg>
         {t('menu.rename')}
       </button>
+
+      {customName && (
+        <button className="ctx-menu-item" onClick={handleClearCustomName}>
+          <svg {...ICON_PROPS}>
+            <path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>
+          </svg>
+          {t('menu.clear_custom_name')}
+        </button>
+      )}
+
+      {(autoNamed || customName) && (
+        <button className="ctx-menu-item" onClick={handleUseOriginalName}>
+          <svg {...ICON_PROPS}>
+            <path d="M12 3v18"/><path d="M5 8h14"/><path d="M8 8v9a4 4 0 0 0 8 0V8"/>
+          </svg>
+          {t('menu.use_original_name')}
+        </button>
+      )}
 
       <div className="ctx-menu-divider" />
 

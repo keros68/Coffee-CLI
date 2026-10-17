@@ -100,21 +100,22 @@ function emit() {
   for (const l of listeners) l();
 }
 
+/** Epoch ms for a `saved_at` value. The scanners emit epoch-ms strings, but
+ *  older rows carry ISO timestamps and a few carry seconds instead of ms;
+ *  both shapes resolve here. 0 = unparseable. Exported because the auto-name
+ *  pass needs the same "how long has this session been quiet" math. */
+export function savedAtMs(savedAt: string): number {
+  let ms = Date.parse(savedAt);
+  if (isNaN(ms)) {
+    const n = Number(savedAt);
+    if (!isNaN(n)) ms = n < 1e11 ? n * 1000 : n;
+  }
+  return isNaN(ms) ? 0 : ms;
+}
+
 export function sortByMtime(list: SavedSession[]): SavedSession[] {
   const copy = [...list];
-  copy.sort((a, b) => {
-    let ams = Date.parse(a.saved_at);
-    if (isNaN(ams)) {
-      const n = Number(a.saved_at);
-      if (!isNaN(n)) ams = n < 1e11 ? n * 1000 : n;
-    }
-    let bms = Date.parse(b.saved_at);
-    if (isNaN(bms)) {
-      const n = Number(b.saved_at);
-      if (!isNaN(n)) bms = n < 1e11 ? n * 1000 : n;
-    }
-    return (bms || 0) - (ams || 0);
-  });
+  copy.sort((a, b) => savedAtMs(b.saved_at) - savedAtMs(a.saved_at));
   return copy;
 }
 

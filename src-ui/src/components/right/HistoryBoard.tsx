@@ -15,6 +15,8 @@ import {
 import { subscribeHidden, getHiddenSnapshot, hideSession } from '../../lib/hidden-sessions';
 import { subscribePinned, getPinnedSnapshot } from '../../lib/pinned-sessions';
 import { subscribeRenamed, getRenamedSnapshot, setCustomName } from '../../lib/renamed-sessions';
+import { subscribeAutoNamed, getAutoNamedSnapshot } from '../../lib/auto-named-sessions';
+import { subscribeAutoNameEnabled, getAutoNameEnabledSnapshot } from '../../lib/session-autoname';
 import {
   subscribeGroups,
   getGroupsSnapshot,
@@ -176,6 +178,15 @@ export function HistoryBoard() {
   // Custom session titles from localStorage (rename feature) - re-renders
   // the list the instant a rename lands.
   const renamed = useSyncExternalStore(subscribeRenamed, getRenamedSnapshot);
+  // Auto-generated titles (`项目｜目标`) - the layer under a manual rename and
+  // above the CLI's own first-message title. Generated in the background by
+  // lib/session-autoname.ts; this subscription repaints the list when a pass
+  // lands.
+  const autoNamed = useSyncExternalStore(subscribeAutoNamed, getAutoNamedSnapshot);
+  // Settings ▸ Sessions switch. Off = generated titles are hidden (the CLI's
+  // own titles come back) and no new ones are written; the stored names are
+  // kept, so switching back on shows them again.
+  const autoNameOn = useSyncExternalStore(subscribeAutoNameEnabled, getAutoNameEnabledSnapshot);
   // Inline-rename editing state: which card is being renamed (`${tool}:${id}`
   // key, null = none) and the draft value.
   const [renamingKey, setRenamingKey] = useState<string | null>(null);
@@ -324,6 +335,14 @@ export function HistoryBoard() {
     return () => clearTimeout(h);
   }, [sessionSearchQuery]);
 
+  // Title on screen for one row: manual rename > auto name > the tool's own
+  // title. Used by the card and by the rename draft.
+  const displayedName = (s: SavedSession) => {
+    const k = `${s.tool ?? ''}:${s.id}`;
+    const generated = autoNameOn ? autoNamed[k] : undefined;
+    return renamed[k] ?? generated ?? s.name;
+  };
+
   // Normalize once: trim + collapse runs of whitespace + lowercase. Empty after
   // normalization means "no query → show all". Matching against projectName(cwd)
   // too so a user can find a project's sessions by typing its folder name — the
@@ -347,10 +366,17 @@ export function HistoryBoard() {
     const q = debouncedQuery.trim().replace(/\s+/g, ' ').toLowerCase();
     if (q) {
       list = list.filter(s => {
-        const name = (renamed[`${s.tool ?? ''}:${s.id}`] ?? s.name ?? '').toLowerCase();
+        const k = `${s.tool ?? ''}:${s.id}`;
+        // Match both the title on screen and the CLI's own title underneath:
+        // a generated name replaces what the user typed in the session, and
+        // searching for a phrase they remember should still find it. A
+        // generated name only counts while it is actually on screen.
+        const generated = autoNameOn ? (autoNamed[k] ?? '') : '';
+        const name = ((renamed[k] ?? generated) || s.name || '').toLowerCase();
+        const original = (s.name ?? '').toLowerCase();
         const proj = projectName(s.cwd ?? '', s.tool ?? '').toLowerCase();
         const tool = s.tool === 'coffee-agent' ? 'coffee agent' : getToolName(s.tool ?? '').toLowerCase();
-        return name.includes(q) || proj.includes(q) || tool.includes(q);
+        return name.includes(q) || original.includes(q) || proj.includes(q) || tool.includes(q);
       });
     }
     // Pinned (置顶) sessions sort to the top. history-cache already returns
@@ -364,7 +390,7 @@ export function HistoryBoard() {
       });
     }
     return list;
-  }, [baseSessions, debouncedQuery, hidden, pinned, activeProject, renamed]);
+  }, [baseSessions, debouncedQuery, hidden, pinned, activeProject, renamed, autoNamed, autoNameOn]);
 
   // Progressive render: data is already fully in memory (history-cache reads
   // every jsonl on startup), so "load more" is just rendering more rows.
@@ -465,7 +491,7 @@ export function HistoryBoard() {
         key={`${rowKey}:${session.file_path ?? session.saved_at}`}
         hideLabel={t('menu.delete')}
         active={isAgent && session.id === activeAgentConversation && state.agentPageActive === 'agent'}
-        displayName={renamed[rowKey] ?? session.name}
+        displayName={displayedName(session)}
         toolIcon={isAgent ? null : getToolIcon(session.tool)}
         metaText={`${isAgent ? 'Coffee Agent' : projectName(session.cwd, session.tool)} · ${dateLabel(session)}${messages}`}
         isRenaming={renamingKey === rowKey}
@@ -494,12 +520,13 @@ export function HistoryBoard() {
     );
   };
 
-  // Enter inline-rename mode on a card (invoked from the context menu).
+  // Enter inline-rename mode on a card (invoked from the context menu). The
+  // draft starts from the title actually on screen, which may be the generated
+  // one, so tweaking an auto name is a one-word edit instead of a retype.
   const startRename = (saved: SavedSession) => {
-    const k = `${saved.tool ?? ''}:${saved.id}`;
     cancelRenameRef.current = false;
-    setRenamingKey(k);
-    setRenameValue(renamed[k] ?? saved.name ?? '');
+    setRenamingKey(`${saved.tool ?? ''}:${saved.id}`);
+    setRenameValue(displayedName(saved));
   };
 
   const handleViewHistory = (saved: SavedSession) => {
