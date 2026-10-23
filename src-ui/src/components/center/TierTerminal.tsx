@@ -478,7 +478,12 @@ function TierTerminalImpl({
 
   // ── Terminal context menu ────────────────────────────────────────────────
   const [ctxMenu, setCtxMenu] = useState<TermContextMenuState | null>(null);
-  const closeCtxMenu = useCallback(() => setCtxMenu(null), []);
+  const ctxMenuSelectionRef = useRef<string>('');
+  const mouseDownPosRef = useRef<{ x: number; y: number } | null>(null);
+  const closeCtxMenu = useCallback(() => {
+    ctxMenuSelectionRef.current = '';
+    setCtxMenu(null);
+  }, []);
 
   const t = useT();
 
@@ -1157,6 +1162,81 @@ function TierTerminalImpl({
       return true; // Let xterm handle all other keys natively
     });
 
+    // ── Unified native selection across all TUIs ───────────────────────────
+    // Keep xterm.js in charge of left-click drag selection across all CLI tools
+    // (including Claude Code, which re-emits `\x1b[?1000h\x1b[?1002h\x1b[?1003h`
+    // after startup / resize / subshell handoff). Allowing TUI mouse-capture
+    // modes (`9`, `1000`, `1002`, `1003`) disables xterm's SelectionService,
+    // greys out Right-Click -> Copy, and hands drag-select to Claude Code's
+    // unstable PowerShell `Set-Clipboard` copyOnSelect path. Instead, we block
+    // pointer-button/motion mouse capture while remembering that the TUI wants
+    // SGR wheel scrolling (`sgrWheelRef`), so selection is always "select first,
+    // then explicitly Copy / Ctrl+C" and mouse wheel scrolling still works.
+    const sgrWheelRef = { current: false };
+    const MOUSE_CAPTURE_DEC_MODES = new Set([9, 1000, 1002, 1003, 1005, 1006, 1015, 1016]);
+    const coreMouseService = Reflect.get(Reflect.get(term, '_core') ?? {}, 'coreMouseService');
+    const coreMouseProto = coreMouseService && Object.getPrototypeOf(coreMouseService);
+    const activeProtocolDesc =
+      coreMouseProto && Object.getOwnPropertyDescriptor(coreMouseProto, 'activeProtocol');
+    if (coreMouseService && activeProtocolDesc?.get && activeProtocolDesc?.set) {
+      const getProto = activeProtocolDesc.get;
+      const setProto = activeProtocolDesc.set;
+      Object.defineProperty(coreMouseService, 'activeProtocol', {
+        configurable: true,
+        get() {
+          return getProto.call(this);
+        },
+        set(val) {
+          if (val === 'NONE') setProto.call(this, val);
+        },
+      });
+    }
+    term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, (params) => {
+      let onlyMouseModes = params.length > 0;
+      for (const p of params) {
+        if (p === 1000 || p === 1002 || p === 1003) {
+          sgrWheelRef.current = true;
+        }
+        if (typeof p !== 'number' || !MOUSE_CAPTURE_DEC_MODES.has(p)) {
+          onlyMouseModes = false;
+        }
+      }
+      return onlyMouseModes;
+    });
+    term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, (params) => {
+      let onlyMouseModes = params.length > 0;
+      for (const p of params) {
+        if (p === 1000 || p === 1002 || p === 1003 || p === 1049 || p === 1047 || p === 47) {
+          sgrWheelRef.current = false;
+        }
+        if (typeof p !== 'number' || !MOUSE_CAPTURE_DEC_MODES.has(p)) {
+          onlyMouseModes = false;
+        }
+      }
+      return onlyMouseModes;
+    });
+
+    // Support OSC 52 clipboard writes (`\x1b]52;c;<base64>\x07`) for explicit
+    // TUI copy actions (e.g. `/copy` in Claude Code) via the native clipboard.
+    term.parser.registerOscHandler(52, (data) => {
+      const semi = data.indexOf(';');
+      if (semi < 0) return false;
+      const target = data.slice(0, semi);
+      const b64 = data.slice(semi + 1).trim();
+      if (!b64 || b64 === '?') return true;
+      if (target && !target.includes('c') && !target.includes('p')) return true;
+      try {
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const text = new TextDecoder('utf-8').decode(bytes);
+        if (text) clipboardWrite(text);
+      } catch {
+        // Ignore malformed base64 payloads
+      }
+      return true;
+    });
+
     // ── Alternate-scroll mode (mouse wheel in full-screen TUIs) ───────────
     // Real terminals (Windows Terminal, iTerm2, xterm) translate the mouse
     // wheel into arrow-key presses when an app is in the ALTERNATE screen
@@ -1193,11 +1273,12 @@ function TierTerminalImpl({
           Math.abs(e.deltaY) / 100;                                // pixels
         const lines = Math.max(1, Math.min(Math.round(notches * 3), 9));
 
-        // ConPTY drops these agents' mouse-enable sequences. Their full-screen
-        // views expect SGR wheel reports; arrows recall prompts instead. Keep
-        // the workaround wheel-only so shell selection and other TUIs retain
-        // their existing behavior. xterm's parsed buffer handles split output.
-        if (IS_WINDOWS && (tool === 'pi' || tool === 'omp' || tool === 'claude')) {
+        // ConPTY drops these agents' mouse-enable sequences, and our CSI filter
+        // above also keeps xterm mouse capture off so native text selection works
+        // consistently. Forward SGR wheel reports whenever the TUI requested
+        // mouse mode (`sgrWheelRef`) or is one of the known Windows full-screen
+        // agents whose initial mouse sequence ConPTY stripped.
+        if ((typeof sgrWheelRef !== 'undefined' && sgrWheelRef.current) || (IS_WINDOWS && (tool === 'pi' || tool === 'omp' || tool === 'claude'))) {
           const screen = term.element?.querySelector('.xterm-screen')?.getBoundingClientRect();
           if (screen && screen.width > 0 && screen.height > 0) {
             const col = Math.max(1, Math.min(term.cols, Math.floor((e.clientX - screen.left) * term.cols / screen.width) + 1));
@@ -2232,9 +2313,14 @@ function TierTerminalImpl({
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          setCtxMenu({ x: e.clientX, y: e.clientY, hasSelection: !!xtermRef.current?.hasSelection() });
+          const sel = xtermRef.current?.getSelection() ?? '';
+          ctxMenuSelectionRef.current = sel;
+          setCtxMenu({ x: e.clientX, y: e.clientY, hasSelection: sel.length > 0 });
         }}
         onMouseDown={(e) => {
+          if (e.button === 0) {
+            mouseDownPosRef.current = { x: e.clientX, y: e.clientY };
+          }
           // Windows IME fix (issue #88), part 1 of 2: on left-click, re-anchor
           // the hidden .xterm-helper-textarea to the buffer cursor (the TUI
           // input box), so Windows IME later re-reads the input-box position
@@ -2262,18 +2348,23 @@ function TierTerminalImpl({
             }
           }
         }}
-        onClick={() => {
+        onClick={(e) => {
           // Windows IME fix (issue #88), part 2 of 2: the mouse gesture is
           // complete, so blur/refocus the helper textarea to force Windows IME
           // to re-read the position anchored on mousedown. Skipped when the
           // gesture produced a selection — that was a drag-select, not an
           // intent to type, and cycling focus there serves no purpose
           // (issue #92).
+          const downPos = mouseDownPosRef.current;
+          mouseDownPosRef.current = null;
+          const wasDrag = downPos
+            ? Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > 4
+            : false;
           if (!__IS_LINUX__ && navigator.userAgent.toLowerCase().includes('win')) {
             // Blurring now would cancel an in-flight composition — let it
             // finish; the next click re-anchors.
             if (imeFrozenRef.current) return;
-            if (xtermRef.current?.hasSelection()) return;
+            if (wasDrag || xtermRef.current?.hasSelection()) return;
             const textarea = termRef.current?.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
             if (textarea) {
               textarea.blur();
@@ -2337,7 +2428,8 @@ function TierTerminalImpl({
           menu={ctxMenu}
           onClose={closeCtxMenu}
           onCopy={() => {
-            const text = xtermRef.current?.getSelection();
+            const text = xtermRef.current?.getSelection() || ctxMenuSelectionRef.current;
+            ctxMenuSelectionRef.current = '';
             if (text) clipboardWrite(text);
             closeCtxMenu();
           }}

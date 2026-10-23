@@ -120,4 +120,54 @@ await test('entry and exit in one output burst leave normal scrolling and select
   assert.equal(f.writes.length, 0);
   f.term.dispose();
 });
+
+await test('unified native selection blocks TUI mouse capture while preserving SGR wheel and OSC 52 copy', async () => {
+  const selBegin = source.indexOf('    const sgrWheelRef = { current: false };');
+  assert.ok(selBegin >= 0, 'locate unified native selection setup');
+  const fullCode = source.slice(selBegin, end);
+
+  const term = new Terminal({ cols: 80, rows: 24, allowProposedApi: true });
+  Object.defineProperty(term, 'element', { value: { querySelector: () => ({ getBoundingClientRect: () => screen }) } });
+  const writes = [];
+  const copied = [];
+  let handler;
+  term.attachCustomWheelEventHandler = callback => { handler = callback; };
+  runInNewContext(fullCode, {
+    term, tool: 'claude', IS_WINDOWS: false, sessionId: 'sel-test',
+    atob, Uint8Array, TextDecoder,
+    clipboardWrite(text) { copied.push(text); },
+    forwardTerminalInput(id, data) {
+      assert.equal(id, 'sel-test');
+      writes.push(data);
+      return Promise.resolve();
+    },
+  });
+  const write = data => new Promise(resolve => term.write(data, resolve));
+  const wheel = (overrides = {}) => {
+    let prevented = false;
+    const handledByXterm = handler({
+      deltaY: -100, deltaMode: 0, clientX: 25, clientY: 55,
+      shiftKey: false, altKey: false, ctrlKey: false,
+      ...overrides, preventDefault() { prevented = true; },
+    });
+    return { handledByXterm, prevented };
+  };
+
+  // Simulate Claude Code re-emitting mouseOnSeq() after DECRQM 1016 / resize
+  await write('\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h');
+  assert.equal(term.buffer.active.type, 'alternate');
+  assert.equal(term.modes.mouseTrackingMode, 'none', 'mouse capture stays off so xterm selection works');
+  assert.deepEqual(wheel(), { handledByXterm: false, prevented: true });
+  assert.equal(writes[0], '\x1b[<64;1;1M');
+
+  // Compound DECSET mixing 1049 and 1003 also keeps mouseTrackingMode === 'none'
+  await write('\x1b[?1049;1003h');
+  assert.equal(term.modes.mouseTrackingMode, 'none');
+
+  // Explicit TUI OSC 52 copy (e.g. /copy) writes decoded UTF-8 to clipboardWrite
+  await write('\x1b]52;c;' + Buffer.from('复制测试 123', 'utf8').toString('base64') + '\x07');
+  assert.deepEqual(copied, ['复制测试 123']);
+
+  term.dispose();
+});
 console.log(`\n${passed} terminal wheel tests passed.`);
