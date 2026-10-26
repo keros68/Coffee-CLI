@@ -565,6 +565,36 @@ async fn read_clipboard_image(app: tauri::AppHandle) -> Result<Option<String>, S
 
 // ─── File System Operations ───────────────────────────────────────────────────
 
+/// Most candidates one terminal line can ask about; the rest are ignored.
+const MAX_PATH_CANDIDATES: usize = 64;
+
+/// Resolve file paths printed in a terminal: each candidate that exists on
+/// disk, absolute or relative to `cwd`, comes back as an absolute path; the
+/// others come back as None. Backs the clickable paths in the terminal.
+#[tauri::command(async)]
+fn resolve_existing_paths(cwd: Option<String>, candidates: Vec<String>) -> Vec<Option<String>> {
+    candidates
+        .iter()
+        .take(MAX_PATH_CANDIDATES)
+        .map(|candidate| resolve_existing_path(cwd.as_deref(), candidate))
+        .collect()
+}
+
+fn resolve_existing_path(cwd: Option<&str>, candidate: &str) -> Option<String> {
+    if candidate.is_empty() || candidate.contains('\0') {
+        return None;
+    }
+    let path = std::path::Path::new(candidate);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::path::Path::new(cwd.filter(|c| !c.is_empty())?).join(path)
+    };
+    // `absolute` also folds `.` / `..` and, on Windows, turns `/` into `\`.
+    let full = std::path::absolute(&joined).ok()?;
+    full.exists().then(|| full.to_string_lossy().into_owned())
+}
+
 /// Open the native file explorer and highlight / reveal the given path.
 #[tauri::command(async)]
 fn show_in_folder(path: String) -> Result<(), String> {
@@ -5873,6 +5903,7 @@ pub fn start_ui(pending_launch: Option<crate::launch::LaunchRequest>) -> anyhow:
             list_directory,
             read_text_file,
             show_in_folder,
+            resolve_existing_paths,
             fs_delete,
             fs_rename,
             fs_paste,
@@ -6225,6 +6256,29 @@ mod file_ops_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_paths_resolve_only_when_they_exist() {
+        let root = std::env::temp_dir().join(format!("coffee-cli-paths-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("草稿.md"), "x").unwrap();
+        let cwd = root.to_string_lossy().into_owned();
+        let expected = std::path::absolute(root.join("src").join("草稿.md")).unwrap();
+        let expected = expected.to_string_lossy().into_owned();
+
+        assert_eq!(resolve_existing_path(Some(&cwd), "src/草稿.md").as_deref(), Some(expected.as_str()));
+        assert_eq!(resolve_existing_path(Some(&cwd), "./src/../src/草稿.md").as_deref(), Some(expected.as_str()));
+        assert_eq!(resolve_existing_path(None, &expected).as_deref(), Some(expected.as_str()));
+        assert!(resolve_existing_path(Some(&cwd), "src").is_some(), "folders count");
+        assert_eq!(resolve_existing_path(Some(&cwd), "src/missing.md"), None);
+        assert_eq!(resolve_existing_path(None, "src/草稿.md"), None, "relative needs a cwd");
+        assert_eq!(resolve_existing_path(Some(""), "src/草稿.md"), None);
+        assert_eq!(resolve_existing_path(Some(&cwd), ""), None);
+
+        let many = vec!["src".to_string(); MAX_PATH_CANDIDATES + 5];
+        assert_eq!(resolve_existing_paths(Some(cwd), many).len(), MAX_PATH_CANDIDATES);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn rfc3339_timestamps_parse_to_epoch_milliseconds() {

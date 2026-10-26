@@ -6,15 +6,20 @@ export interface TermContextMenuState {
   x: number;
   y: number;
   hasSelection: boolean;
+  /** Absolute path of a file link under the pointer; adds file actions. */
+  path?: string;
 }
 
 /** Shared read-only surface menu used by both xterm and ConversationView. */
-export function TermContextMenu({ menu, onClose, onCopy, onPaste, onSelectAll }: {
+export function TermContextMenu({ menu, onClose, onCopy, onPaste, onSelectAll, onOpenPath, onRevealPath, onCopyPath }: {
   menu: TermContextMenuState;
   onClose: () => void;
   onCopy: () => void;
   onPaste: () => void;
   onSelectAll: () => void;
+  onOpenPath?: (path: string) => void;
+  onRevealPath?: (path: string) => void;
+  onCopyPath?: (path: string) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const isMac = navigator.platform.toUpperCase().includes('MAC');
@@ -41,10 +46,32 @@ export function TermContextMenu({ menu, onClose, onCopy, onPaste, onSelectAll }:
   }, [onClose]);
 
   const left = Math.max(4, Math.min(menu.x, window.innerWidth - 164));
-  const top = Math.max(4, Math.min(menu.y, window.innerHeight - 116));
+  const path = menu.path;
+  const fileActions = path ? ([
+    [t('menu.open'), onOpenPath],
+    [t('menu.show_in_folder'), onRevealPath],
+    [t('menu.copy_abs'), onCopyPath],
+  ] as const).filter(([, run]) => run) : [];
+  const height = 116 + (fileActions.length ? fileActions.length * 30 + 9 : 0);
+  const top = Math.max(4, Math.min(menu.y, window.innerHeight - height));
 
   return createPortal(
     <div ref={ref} className="term-ctx-menu" style={{ left, top }}>
+      {path && fileActions.map(([label, run]) => (
+        <button
+          key={label}
+          type="button"
+          className="term-ctx-item"
+          title={path}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            run?.(path);
+          }}
+        >
+          <span>{label}</span>
+        </button>
+      ))}
+      {fileActions.length > 0 && <div className="term-ctx-sep" />}
       <button
         type="button"
         className={`term-ctx-item${menu.hasSelection ? '' : ' disabled'}`}

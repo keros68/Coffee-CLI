@@ -50,6 +50,7 @@ import { getToolDisplayName } from '../../lib/tool-info';
 import { THEME_COLORS } from '../../lib/personalization';
 import { useDataAttr } from '../../lib/use-data-attr';
 import { TermContextMenu, type TermContextMenuState } from './TermContextMenu';
+import { findPathCandidates, resolvePathCandidates } from '../../lib/terminal-path-links';
 import '@xterm/xterm/css/xterm.css';
 import './TierTerminal.css';
 
@@ -477,6 +478,11 @@ function TierTerminalImpl({
   const [ctxMenu, setCtxMenu] = useState<TermContextMenuState | null>(null);
   const ctxMenuSelectionRef = useRef<string>('');
   const mouseDownPosRef = useRef<{ x: number; y: number } | null>(null);
+  // The file path under the mouse, so a right-click on it offers file actions.
+  const hoveredPathRef = useRef<string | null>(null);
+  // Relative paths in the output resolve against the live cwd (OSC 7 updates it).
+  const folderPathRef = useRef(folderPath);
+  useEffect(() => { folderPathRef.current = folderPath; }, [folderPath]);
   const closeCtxMenu = useCallback(() => {
     ctxMenuSelectionRef.current = '';
     setCtxMenu(null);
@@ -1301,60 +1307,83 @@ function TierTerminalImpl({
       }
     });
 
-    // Clickable links: URLs only (http/https/file). Bare file/dir paths are
-    // intentionally NOT matched — unquoted paths with spaces (e.g. Windows
-    // "Coffee CLI_3.0.3...exe") can't be reliably bounded by a regex (would
-    // truncate → open a missing path → OS error dialog, or over-match → open
-    // the wrong file). Users select+copy paths instead. URLs are unambiguous
-    // — clear scheme prefix, no spaces.
-    // Underlines matched tokens on hover; click opens via Tauri's open_url
-    // command (OS default browser).
-    // URLs are ASCII per RFC 3986; the -￿ guard stops the match at
+    // Clickable links. URLs (http/https/file) open in the OS default browser.
+    // File paths (`src/a.ts`, `src/a.ts:42`, `D:\work\x.md`) are linked only
+    // when the backend finds them on disk, relative ones against the session
+    // cwd, so a wrong guess is never underlined; click opens the file with its
+    // default app and right-click adds file actions to the menu. Unquoted paths
+    // with spaces are not matched (see terminal-path-links.ts).
+    // URLs are ASCII per RFC 3986; the \u0080-\uffff guard stops the match at
     // any non-ASCII char so trailing CJK punctuation/text (e.g. "https://x，看到…")
     // doesn't get swallowed into the link.
-    const LINK_RE = /(https?:\/\/[^\s<>()"'-￿]+|file:\/\/\/[^\s<>()"'-￿]+)/g;
+    const LINK_RE = /(https?:\/\/[^\s<>()"'\u0080-\uffff]+|file:\/\/\/[^\s<>()"'\u0080-\uffff]+)/g;
     term.registerLinkProvider({
       provideLinks(bufferLineNumber, callback) {
         const line = term.buffer.active.getLine(bufferLineNumber - 1);
         if (!line) { callback([]); return; }
-        // Build the line text alongside a JS-index → terminal-column map.
+        // Build the line text alongside JS-index → terminal-column maps.
         // xterm's range.x is in terminal columns, but a CJK / emoji char is
         // one JS code-unit-ish but two columns wide. Using m.index directly
         // makes the hover underline drift left by one column per wide char
-        // sitting before the URL on the same line. Cell iteration keeps the
+        // sitting before the link on the same line. Cell iteration keeps the
         // mapping accurate regardless of wide-char prefix.
         let text = '';
         const colByStrIdx: number[] = [];
+        const endColByStrIdx: number[] = []; // 1-based last column of the cell
         const cellCount = line.length;
         for (let col = 0; col < cellCount; col++) {
           const cell = line.getCell(col);
           if (!cell) continue;
           const chars = cell.getChars();
           if (!chars) continue; // empty cell or the right half of a wide char
-          for (let i = 0; i < chars.length; i++) colByStrIdx.push(col);
+          const endCol = col + Math.max(1, cell.getWidth());
+          for (let i = 0; i < chars.length; i++) {
+            colByStrIdx.push(col);
+            endColByStrIdx.push(endCol);
+          }
           text += chars;
         }
+        const rangeOf = (index: number, length: number) => ({
+          start: { x: (colByStrIdx[index] ?? index) + 1, y: bufferLineNumber },
+          end: { x: endColByStrIdx[index + length - 1] ?? index + length, y: bufferLineNumber },
+        });
         const links: ILink[] = [];
+        const urlSpans: [number, number][] = [];
         let m;
         LINK_RE.lastIndex = 0;
         while ((m = LINK_RE.exec(text)) !== null) {
           const raw = m[0].replace(/[),.]+$/, '');
-          const firstCol = colByStrIdx[m.index] ?? m.index;
-          // URL bodies are ASCII (width-1), so end column = first + length.
-          const startCol = firstCol + 1;
-          const endCol = firstCol + raw.length;
+          urlSpans.push([m.index, m.index + raw.length]);
           links.push({
-            range: {
-              start: { x: startCol, y: bufferLineNumber },
-              end: { x: endCol, y: bufferLineNumber },
-            },
+            range: rangeOf(m.index, raw.length),
             text: raw,
             activate: () => {
               commands.openUrl(raw).catch(() => {});
             },
           });
         }
-        callback(links);
+        const candidates = findPathCandidates(text).filter(c =>
+          !urlSpans.some(([a, b]) => c.index < b && c.index + c.length > a));
+        if (!candidates.length) { callback(links); return; }
+        resolvePathCandidates(folderPathRef.current, candidates.map(c => c.path)).then(resolved => {
+          candidates.forEach((c, i) => {
+            const absolute = resolved[i];
+            if (!absolute) return;
+            links.push({
+              range: rangeOf(c.index, c.length),
+              text: absolute,
+              decorations: { underline: true, pointerCursor: true },
+              hover: () => { hoveredPathRef.current = absolute; },
+              leave: () => {
+                if (hoveredPathRef.current === absolute) hoveredPathRef.current = null;
+              },
+              activate: () => {
+                commands.openUrl(absolute).catch(() => {});
+              },
+            });
+          });
+          callback(links);
+        });
       },
     });
 
@@ -2307,7 +2336,12 @@ function TierTerminalImpl({
           e.stopPropagation();
           const sel = xtermRef.current?.getSelection() ?? '';
           ctxMenuSelectionRef.current = sel;
-          setCtxMenu({ x: e.clientX, y: e.clientY, hasSelection: sel.length > 0 });
+          setCtxMenu({
+            x: e.clientX,
+            y: e.clientY,
+            hasSelection: sel.length > 0,
+            path: hoveredPathRef.current ?? undefined,
+          });
         }}
         onMouseDown={(e) => {
           if (e.button === 0) {
@@ -2440,6 +2474,18 @@ function TierTerminalImpl({
           }}
           onSelectAll={() => {
             xtermRef.current?.selectAll();
+            closeCtxMenu();
+          }}
+          onOpenPath={(path) => {
+            commands.openUrl(path).catch(() => {});
+            closeCtxMenu();
+          }}
+          onRevealPath={(path) => {
+            commands.showInFolder(path).catch(() => {});
+            closeCtxMenu();
+          }}
+          onCopyPath={(path) => {
+            clipboardWrite(path);
             closeCtxMenu();
           }}
         />

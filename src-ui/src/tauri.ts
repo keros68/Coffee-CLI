@@ -263,6 +263,10 @@ export const commands = {
   fsPaste: (action: string, srcPath: string, targetDir: string) =>
     invoke<void>('fs_paste', { action, srcPath, targetDir }),
   showInFolder: (path: string) => invoke<void>('show_in_folder', { path }),
+  // Absolute path for each candidate that exists on disk (relative ones
+  // against cwd), null for the rest. Backs clickable paths in the terminal.
+  resolveExistingPaths: (cwd: string | null, candidates: string[]) =>
+    invoke<(string | null)[]>('resolve_existing_paths', { cwd, candidates }),
 
   // Task Board persistence (~/.coffee-cli/tasks.json)
   loadTasks: () => invoke<string>('load_tasks'),
