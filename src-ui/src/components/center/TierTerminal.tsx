@@ -36,7 +36,6 @@ import { parseCodexTerminalTitle } from '../../lib/codex-terminal-title';
 import { parseOmpTerminalTitle } from '../../lib/omp-terminal-title';
 import { parseOpenCodeTerminalTitle } from '../../lib/opencode-terminal-title';
 import { markNotifySoundPromptSubmitted } from '../../lib/notify-sound';
-import { markSentinelExit, markSentinelWorking } from '../../lib/agent-sentinel';
 import { usesSelfRenderedCaret } from '../../lib/chat-tools';
 import { onWindowForeground } from '../../lib/window-focus-filter';
 import { createTerminalSizeSync, DEFAULT_TERMINAL_GRID } from '../../lib/terminal-size-sync';
@@ -44,7 +43,6 @@ import { UI_SCALE_CHANGED } from '../../lib/ui-scale';
 import { clearWebglDrawingBuffers } from '../../lib/terminal-ghost';
 import { IS_WINDOWS } from '../../lib/platform';
 import { commands } from '../../tauri';
-import { registerTerminalObserver } from '../../lib/terminal-observer';
 import { confirmTerminalAgentStatus, forwardTerminalInput, isTerminalSubmitInput, registerTerminalControl, setTerminalControlReady, submitTerminalPrompt, terminalControlStatus } from '../../lib/terminal-control';
 import { supportsAgentStatus, useAppDispatch, useAppStateRef, type AgentStatus, type ToolType, type ThemeColor } from '../../store/app-state';
 import { useT } from '../../i18n/useT';
@@ -370,7 +368,6 @@ interface TierTerminalProps {
    *  effect passes it to tierTerminalStart, which spawns the tool with
    *  `--resume <token>` instead of a fresh launch. */
   resumeToken?: string;
-  strictCwd?: boolean;
   hasBg?: boolean;
   bgUrl?: string;
   bgType?: 'image' | 'video' | 'none';
@@ -394,7 +391,7 @@ interface RemoteTerminalConfig {
 
 function TierTerminalImpl({
   sessionId, tool, toolName, theme, lang, isActive, conversationActive = false,
-  toolData, folderPath, resumeToken, strictCwd, hasBg, bgUrl, bgType, termColorScheme, termFont,
+  toolData, folderPath, resumeToken, hasBg, bgUrl, bgType, termColorScheme, termFont,
 }: TierTerminalProps) {
   const selfRenderedCaret = usesSelfRenderedCaret(tool);
   // Which half of the colour family is on screen (App.tsx owns the attribute;
@@ -557,13 +554,11 @@ function TierTerminalImpl({
       clearScreenIdleTimer();
       screenStatus = status;
       screenStatusAt = Date.now();
-      if (status === 'working') markSentinelWorking(sessionId);
       dispatch({ type: 'SET_AGENT_STATUS', id: sessionId, status });
     };
     const publishNativeStatus = (status: AgentStatus) => {
       confirmTerminalAgentStatus(sessionId);
       nativeStatus = status;
-      if (status === 'working') markSentinelWorking(sessionId);
       const screenIsFresh = Date.now() - screenStatusAt < 2_000;
       const interactionIsLive = hasTerminalInteraction(sessionId);
       // A rendered selector is stronger than a coarse native idle title, and
@@ -1369,7 +1364,6 @@ function TierTerminalImpl({
     // outputScheduler.enqueue instead of term.write directly, so the session
     // must exist first to avoid a dropped-first-chunk race.
     outputScheduler.registerSession(sessionId, term);
-    unlisteners.push(registerTerminalObserver(sessionId, term));
     unlisteners.push(registerTerminalControl(sessionId, term, statusConfirmed => {
       markNotifySoundPromptSubmitted(sessionId, tool);
       if (!statusConfirmed) markAgentSubmission();
@@ -1676,7 +1670,6 @@ function TierTerminalImpl({
         },
         onStatus: (running) => {
           if (!mounted || running) return;
-          markSentinelExit(sessionId);
           ptyEnded = true;
           setTerminalControlReady(sessionId, false);
           sizeSync.markPtyStopped();
@@ -1696,7 +1689,6 @@ function TierTerminalImpl({
           // upstream tool's own output). The CLI's own exit text, if any,
           // already speaks for itself.
           if (!mounted) return;
-          markSentinelExit(sessionId);
           ptyEnded = true;
           setTerminalControlReady(sessionId, false);
           sizeSync.markPtyStopped();
@@ -1725,7 +1717,7 @@ function TierTerminalImpl({
       }
 
         try {
-          await commands.tierTerminalStart(sessionId, tool, initialGrid.size.cols, initialGrid.size.rows, theme, lang, toolData, folderPath ?? undefined, resumeToken, appStateRef.current.defaultShell, strictCwd);
+          await commands.tierTerminalStart(sessionId, tool, initialGrid.size.cols, initialGrid.size.rows, theme, lang, toolData, folderPath ?? undefined, resumeToken, appStateRef.current.defaultShell);
           if (mounted && !ptyEnded) setTerminalControlReady(sessionId, true);
           sizeSync.markPtyStarted();
         } catch (err) {

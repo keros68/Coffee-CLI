@@ -19,8 +19,6 @@
   background: var(--bg-hover);
 }
 
-.history-card-active { background: var(--bg-hover); }
-
 /* Light palettes keep session rows flush with the rail until hover, then lift
    the active row onto the brighter workspace surface. This restores the same
    clear block feedback as night mode without bringing back permanent cards. */

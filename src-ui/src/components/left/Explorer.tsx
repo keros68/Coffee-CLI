@@ -1,4 +1,3 @@
-import { ChannelConnectionSummary } from '../agent/AgentPages';
 // Explorer.tsx — Left panel: file tree synced from terminal CWD
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
@@ -914,8 +913,6 @@ export function Explorer() {
       </div>
 
 
-
-      <ChannelConnectionSummary />
 
       {/* Right-click context menu */}
       {ctxMenu && <ContextMenu menu={ctxMenu} onClose={closeCtxMenu} />}

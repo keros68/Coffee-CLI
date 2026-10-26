@@ -17,7 +17,6 @@ import { CharacterBackground } from './components/common/CharacterBackground';
 import { Explorer } from './components/left/Explorer';
 import { CenterPanel } from './components/center/CenterPanel';
 import { ActiveGambit } from './components/center/ActiveGambit';
-import { AgentBridge } from './components/agent/AgentBridge';
 import { RightPanel } from './components/right/Compiler';
 import { GitStatusProvider } from './lib/git-status';
 import './styles/global.css';
@@ -190,8 +189,7 @@ function useSlidingPanel(hidden: boolean): { mounted: boolean; collapsed: boolea
 
 export function App() {
   const { state } = useAppState();
-  const activeTabId = state.agentPageActive ? `agent:${state.agentPageActive}`
-    : state.diffTabActive ? 'diff' : state.activeTerminalId;
+  const activeTabId = state.diffTabActive ? 'diff' : state.activeTerminalId;
   // Resolved half of the palette (index.html sets it pre-paint, the effect
   // below keeps it current) — re-renders us when follow-system flips.
   const resolvedMode = useDataAttr('data-mode');
@@ -490,7 +488,6 @@ export function App() {
       {state.currentShape === 'characters' && <CharacterBackground selectedId={activeTabId} />}
       {/* Custom titlebar — drag region + minimize / maximize / close */}
       <TitleBar />
-      <AgentBridge />
 
       {/* 3-panel workspace. Titlebar toggles flip leftPanelHidden /
           rightPanelHidden. The OS window itself doesn't resize (same

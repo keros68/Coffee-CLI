@@ -1,6 +1,5 @@
 import type { Terminal } from '@xterm/xterm';
 import { commands } from '../tauri';
-import { markSentinelSubmission, cancelSentinelSubmission, markSentinelInterrupt } from './agent-sentinel';
 
 interface Control {
   term: Terminal;
@@ -9,10 +8,8 @@ interface Control {
   dirty: boolean;
   busy: boolean;
   localRevision: number;
-  capture: Promise<void>[] | null;
   onSubmitted: (statusConfirmed: boolean) => void;
   statusRevision: number;
-  draft: string;
 }
 const controls = new Map<string, Control>();
 export class TerminalInputError extends Error {
@@ -21,7 +18,7 @@ export class TerminalInputError extends Error {
 }
 
 export function registerTerminalControl(sessionId: string, term: Terminal, onSubmitted: (statusConfirmed: boolean) => void): () => void {
-  const control: Control = { term, ready: false, dirty: false, busy: false, localRevision: 0, capture: null, onSubmitted, draft: '', statusRevision: 0 };
+  const control: Control = { term, ready: false, dirty: false, busy: false, localRevision: 0, onSubmitted, statusRevision: 0 };
   controls.set(sessionId, control);
   return () => { if (controls.get(sessionId) === control) controls.delete(sessionId); };
 }
@@ -46,39 +43,18 @@ export function isTerminalSubmitInput(sessionId: string, data: string): boolean 
   return !controls.get(sessionId)?.busy && !data.startsWith('\x1b[200~') && /[\r\n]/.test(data);
 }
 
-/** Shared xterm onData path for locally typed input. Programmatic sends (Gambit/Agent)
+/** Shared xterm onData path for locally typed input. Programmatic sends (Gambit)
  *  go through submitTerminalPrompt, which writes to the PTY directly. */
 export function forwardTerminalInput(sessionId: string, data: string): Promise<void> {
   const control = controls.get(sessionId);
-  let submitted = '';
-  const localInput = control && !control.capture;
-  if (localInput) {
-    if (data.includes('\x03') || data.includes('\x15')) control.draft = '';
-    else if (data.startsWith('\x1b[200~')) control.draft = (control.draft + (data.endsWith('\x1b[201~') ? data.slice(6, -6) : data.slice(6))).slice(-4000);
-    else if (data === '\x7f' || data === '\b') control.draft = control.draft.slice(0, -1);
-    else if (data.startsWith('\x1b') && /^(?:\[[0-9;]*|O)[AB]$/.test(data.slice(1))) control.draft ||= '[recalled input]';
-    else if (/^[\r\n]+$/.test(data)) { submitted = control.draft; control.draft = ''; }
-    else if (!data.startsWith('\x1b')) {
-      const parts = data.split(/[\r\n]/);
-      control.draft = (control.draft + parts[0]).slice(-4000);
-      if (parts.length > 1) { submitted = control.draft; control.draft = parts[parts.length - 1]; }
-    }
-  }
-  if (control && !control.capture) {
+  if (control) {
     control.localRevision++;
     if (data.startsWith('\x1b[200~')) control.dirty = true;
     else if (data.includes('\x03') || data.includes('\x15') || /[\r\n]$/.test(data)) control.dirty = false;
     else if (data.startsWith('\x1b') && /^(?:\[[0-9;]*|O)[AB]/.test(data.slice(1))) control.dirty = true;
     else if (data && !data.startsWith('\x1b')) control.dirty = true;
   }
-  const submission = localInput && submitted.trim() ? markSentinelSubmission(sessionId, submitted) : undefined;
-  const write = commands.tierTerminalInput(sessionId, data);
-  control?.capture?.push(write);
-  if (localInput) return write.then(() => {
-    if (controls.get(sessionId) !== control) return;
-    if (data.includes('\x03')) markSentinelInterrupt(sessionId);
-  }, error => { cancelSentinelSubmission(sessionId, submission); throw error; });
-  return write;
+  return commands.tierTerminalInput(sessionId, data);
 }
 
 function requireControl(sessionId: string): Control {
@@ -122,7 +98,6 @@ export async function submitTerminalPrompt(sessionId: string, text: string, guar
   control.busy = true;
   const revision = control.localRevision;
   let attempted = false;
-  let submission: number | undefined;
   try {
     // One bracketed pair spans the whole paste, so the CLI still sees a single
     // paste event — byte-identical to what xterm's own paste() used to emit.
@@ -146,37 +121,14 @@ export async function submitTerminalPrompt(sessionId: string, text: string, guar
     await new Promise(resolve => setTimeout(resolve, Math.min(2000, 150 + last * 40)));
     if (controls.get(sessionId) !== control || !control.ready || !guard()) throw new Error('发送期间目标会话已关闭或改变');
     if (control.localRevision !== revision) throw new Error('发送期间检测到本地输入；文本已粘贴，未自动提交');
-    submission = markSentinelSubmission(sessionId, text);
     const statusRevision = control.statusRevision;
     await commands.tierTerminalInput(sessionId, '\r');
     if (control.localRevision === revision) control.dirty = false;
     control.onSubmitted(control.statusRevision !== statusRevision);
   } catch (error) {
-    cancelSentinelSubmission(sessionId, submission);
     if (attempted) control.dirty = true;
     throw new TerminalInputError(String(error), attempted);
   } finally {
     control.busy = false;
   }
-}
-
-export async function sendTerminalKey(sessionId: string, key: string, guard: () => boolean): Promise<void> {
-  const control = requireControl(sessionId);
-  const arrow = control.term.modes.applicationCursorKeysMode ? '\x1bO' : '\x1b[';
-  const keys: Record<string, string> = { Enter: '\r', Escape: '\x1b', CtrlC: '\x03', Up: `${arrow}A`, Down: `${arrow}B`, Right: `${arrow}C`, Left: `${arrow}D`, Tab: '\t' };
-  if (!(key in keys)) throw new Error('不支持的按键');
-  if (control.dirty && key !== 'CtrlC') throw new Error('终端有本地未提交输入');
-  if (!guard()) throw new Error('目标会话已经改变');
-  control.busy = true;
-  const revision = control.localRevision;
-  const statusRevision = control.statusRevision;
-  try {
-    await commands.tierTerminalInput(sessionId, keys[key]);
-    if (key === 'CtrlC') {
-      if (control.localRevision === revision) { control.dirty = false; control.draft = ''; }
-      markSentinelInterrupt(sessionId);
-    }
-    if (key === 'Enter') control.onSubmitted(control.statusRevision !== statusRevision);
-  } catch (error) { throw new TerminalInputError(String(error), true); }
-  finally { control.busy = false; }
 }

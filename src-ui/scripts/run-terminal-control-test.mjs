@@ -5,9 +5,6 @@ import { fileURLToPath } from 'node:url';
 
 const compiled = await build({
   entryPoints: [fileURLToPath(new URL('../src/lib/terminal-control.ts', import.meta.url))], bundle: true, platform: 'node', format: 'cjs', write: false,
-  plugins: [{ name: 'control-only-sentinel', setup(builder) {
-    builder.onLoad({ filter: /[/\\]agent-sentinel\.ts$/ }, () => ({ loader: 'js', contents: 'export function markSentinelSubmission() {} export function cancelSentinelSubmission() {} export function markSentinelInterrupt() {}' }));
-  } }],
 });
 let passed = 0;
 async function test(name, run) { await run(); passed++; console.log(`  ok  ${name}`); }
@@ -59,13 +56,12 @@ await test('write error rejects and never sends Enter or reports submitted', asy
   assert.equal(f.submitted, 0);
   assert.equal(f.api.terminalControlStatus('target').localInputPending, true);
 });
-await test('local unfinished input blocks remote paste and accidental Enter', async () => {
+await test('local unfinished input blocks remote paste until cleared', async () => {
   const f = fixture(); f.api.setTerminalControlReady('target', true);
   await f.api.forwardTerminalInput('target', 'unsent');
   await assert.rejects(f.api.submitTerminalPrompt('target', 'remote'), /本地未提交/);
-  await assert.rejects(f.api.sendTerminalKey('target', 'Enter', () => true), /本地未提交/);
   assert.equal(f.writes.length, 1);
-  await f.api.sendTerminalKey('target', 'CtrlC', () => true);
+  await f.api.forwardTerminalInput('target', '\x03');
   assert.equal(f.api.terminalControlStatus('target').localInputPending, false);
 });
 await test('a local multiline bracketed paste is unsent input, despite embedded newlines', async () => {
@@ -79,7 +75,6 @@ await test('local history navigation protects recalled input in normal and appli
     const f = fixture(); f.api.setTerminalControlReady('target', true);
     await f.api.forwardTerminalInput('target', key);
     await assert.rejects(f.api.submitTerminalPrompt('target', 'remote'), /本地未提交/);
-    await assert.rejects(f.api.sendTerminalKey('target', 'Enter', () => true), /本地未提交/);
     assert.equal(f.writes.length, 1);
     await f.api.forwardTerminalInput('target', '\x03');
     assert.equal(f.api.terminalControlStatus('target').localInputPending, false);
@@ -117,13 +112,6 @@ await test('cancellation and replacement before delayed Enter cannot write to a 
   f.dispose();
   await assert.rejects(replacement, /已关闭或改变/);
   assert.equal(f.api.terminalControlStatus('target').ready, true);
-});
-await test('uses TUI application cursor mode and rejects arbitrary control sequences', async () => {
-  const f = fixture(); f.api.setTerminalControlReady('target', true); f.term.modes.applicationCursorKeysMode = true;
-  await f.api.sendTerminalKey('target', 'Down', () => true);
-  assert.equal(f.writes[0].data, '\x1bOB');
-  await assert.rejects(f.api.sendTerminalKey('target', '\x1b[3~', () => true), /不支持/);
-  assert.equal(f.writes.length, 1);
 });
 await test('large paste splits into ordered chunks under one bracketed pair before Enter (issue #127)', async () => {
   const f = fixture(); f.api.setTerminalControlReady('target', true);

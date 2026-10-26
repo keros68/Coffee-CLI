@@ -65,7 +65,7 @@ pub fn environment(extra_env: &[(String, String)]) -> Result<String> {
         .join("integrations")
         .join("opencode-island");
     // Use a file URL so spaces, drive letters and non-ASCII home paths survive.
-    let url = reqwest::Url::from_directory_path(&directory)
+    let url = url::Url::from_directory_path(&directory)
         .map_err(|_| anyhow::anyhow!("invalid OpenCode integration path"))?;
     let content = overlay(&config, inherited.as_deref(), url.as_str())?;
     std::fs::create_dir_all(&directory)?;

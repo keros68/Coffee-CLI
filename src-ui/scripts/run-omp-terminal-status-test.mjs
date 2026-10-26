@@ -38,7 +38,6 @@ function fixture(tool = 'omp') {
     ...production, tool, sessionId: 'test', unlisteners: [],
     hasTerminalInteraction: () => false,
     confirmTerminalAgentStatus: () => {},
-    markSentinelWorking: () => {},
     term: { onTitleChange(callback) { listener = callback; } },
     window: {
       setTimeout(callback) { timers.set(++timerId, callback); return timerId; },

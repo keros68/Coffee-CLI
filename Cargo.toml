@@ -19,9 +19,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # Tier Terminal — PTY (portable-pty, WezTerm's cross-platform PTY library)
 portable-pty = "0.9"
-# Local Agent and message-channel tasks run on Tauri's async runtime.
-tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "system-proxy"] }
+# Only `task::spawn_blocking` is used by the system-font scanner.
+tokio = { version = "1", features = ["rt"] }
+url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 # Regex (used by terminal.rs for ANSI strip)
@@ -42,7 +42,6 @@ tauri-plugin-clipboard-manager = "2"
 # Utilities
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.9"
 # Preserve comments and formatting in Devin's JSONC hook configuration.
 jsonc-parser = { version = "0.33.1", features = ["cst", "serde", "serde_json"] }
 anyhow = "1"
@@ -117,7 +116,6 @@ windows = { version = "0.58", features = [
     "Win32_System_JobObjects",
     "Win32_System_Registry",
     "Win32_System_Threading",
-    "Win32_Storage_FileSystem",
 ] }
 
 # Native frosted backdrop for the Frost shape — real desktop blur via the OS

@@ -20,11 +20,6 @@ pub struct AppState {
     pub pending_launch: Mutex<Option<crate::launch::LaunchRequest>>,
 }
 
-#[tauri::command]
-fn agent_bridge_ready(app: tauri::AppHandle) {
-    crate::channels::start_saved(app);
-}
-
 
 #[tauri::command]
 fn window_minimize(window: tauri::Window) {
@@ -755,7 +750,6 @@ async fn tier_terminal_start(
     cwd: Option<String>,
     resume_token: Option<String>,
     shell: Option<String>,
-    strict_cwd: Option<bool>,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
@@ -769,7 +763,7 @@ async fn tier_terminal_start(
     tauri::async_runtime::spawn_blocking(move || {
         tier_terminal_start_blocking(
             session_id, tool, tool_data, cols, rows,
-            theme_mode, locale, cwd, resume_token, shell, strict_cwd.unwrap_or(false), app, terminal_session,
+            theme_mode, locale, cwd, resume_token, shell, app, terminal_session,
         )
     })
     .await
@@ -787,7 +781,6 @@ fn tier_terminal_start_blocking(
     cwd: Option<String>,
     resume_token: Option<String>,
     shell: Option<String>,
-    strict_cwd: bool,
     app: tauri::AppHandle,
     terminal_session: terminal::SharedSession,
 ) -> Result<(), String> {
@@ -960,13 +953,9 @@ fn tier_terminal_start_blocking(
     // --dangerously-skip-permissions" or "run codex through `docker exec mybox`".
     // `remote` is excluded by design: its argv is protocol-derived from
     // runtime tool_data, not configurable.
-    let launch_config = match tool.as_deref() {
-        Some(name) if name == "terminal" || crate::tools::find(name).is_some() => crate::tool_config::get(name),
-        _ => Default::default(),
-    };
     let (cmd, args) = match tool.as_deref() {
         Some(name) if name == "terminal" || crate::tools::find(name).is_some() => {
-            let entry = &launch_config;
+            let entry = crate::tool_config::get(name);
             let (cmd, mut args) = (cmd, args);
             let (cmd, args) = if let (Some(bin), prefix_args) =
                 crate::tool_config::parse_command(&entry.command)
@@ -1009,9 +998,6 @@ fn tier_terminal_start_blocking(
     // Determine the CWD to pass to the Agent:
     // 1. If workspace has an explicit dir (from open-folder or resume) → use it
     // 2. Otherwise default to user's home dir (matches most agents' default)
-    if strict_cwd && (dir.as_os_str().is_empty() || !dir.is_dir()) {
-        return Err("Agent working directory no longer exists; terminal was not started".into());
-    }
     let spawn_cwd = if dir.as_os_str().is_empty() || !dir.is_dir() {
         dirs::home_dir().map(|p| p.to_string_lossy().to_string())
     } else {
@@ -1046,7 +1032,6 @@ fn tier_terminal_start_blocking(
         theme_mode,
         locale,
         extra_env,
-        launch_config,
     ).map_err(|e| format!("Failed to spawn PTY: {}", e))?;
 
     // Emit the initial CWD to the frontend so the left panel can map immediately.
@@ -5849,7 +5834,6 @@ pub fn start_ui(pending_launch: Option<crate::launch::LaunchRequest>) -> anyhow:
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(crate::channels::ChannelRuntime::default())
         .manage(AppState {
             terminal_session,
             fs_watcher: Mutex::new(None),
@@ -5857,29 +5841,6 @@ pub fn start_ui(pending_launch: Option<crate::launch::LaunchRequest>) -> anyhow:
         })
         .invoke_handler(tauri::generate_handler![
             crate::fonts::list_system_fonts,
-            agent_bridge_ready,
-            crate::agent::agent_get_model,
-            crate::agent_modes::agent_get_work_modes,
-            crate::agent_modes::agent_set_work_mode,
-            crate::agent_sentinel::agent_sentinel_report,
-            crate::agent::agent_save_model,
-            crate::agent::agent_get_english_delegation,
-            crate::agent::agent_set_english_delegation,
-            crate::agent::agent_get_conversation,
-            crate::agent::agent_list_conversations,
-            crate::agent::agent_new_conversation,
-            crate::agent::agent_send_message,
-            crate::agent::agent_cancel,
-            crate::agent::agent_resolve_tool,
-            crate::agent::agent_tool_is_pending,
-            crate::agent::agent_validate_directory,
-            crate::agent::agent_create_directory,
-            crate::agent_workspace::agent_workspace_tool,
-            crate::channels::channel_get_settings,
-            crate::channels::channel_connect_telegram,
-            crate::channels::channel_disconnect,
-            crate::channels::channel_weixin_start,
-            crate::channels::channel_weixin_poll,
             pick_folder,
             window_minimize,
             play_notify_sound,

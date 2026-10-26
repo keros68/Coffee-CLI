@@ -13,7 +13,6 @@ export function SessionCard({
   toolIcon,
   metaText,
   hideLabel,
-  active,
   isRenaming,
   renameValue,
   onOpen,
@@ -28,8 +27,6 @@ export function SessionCard({
   metaText: string;
   /** Accessible name of the hide button. */
   hideLabel: string;
-  /** Highlights the conversation open in the agent page right now. */
-  active?: boolean;
   isRenaming: boolean;
   renameValue: string;
   onOpen: () => void;
@@ -42,7 +39,7 @@ export function SessionCard({
   onHide: () => void;
 }) {
   return (
-    <div className={`history-card${active ? ' history-card-active' : ''}`} onClick={onOpen} onContextMenu={onContextMenu}>
+    <div className="history-card" onClick={onOpen} onContextMenu={onContextMenu}>
       <div className="history-card-content">
         <div className="history-card-title-row">
           {isRenaming ? (

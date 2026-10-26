@@ -5,7 +5,6 @@ import { useAppState, type ToolType } from '../../store/app-state';
 import { isTauri } from '../../tauri';
 import type { SavedSession } from '../../tauri';
 import { getToolDisplayName } from '../../lib/tool-info';
-import { useAgentClient, openAgentConversation, refreshAgentConversations } from '../../lib/agent-client';
 import {
   prefetchHistory,
   subscribeHistory,
@@ -153,9 +152,6 @@ const pathBasename = (p: string) => {
 export function HistoryBoard() {
   const t = useT();
   const { state, dispatch } = useAppState();
-  const { conversations, conversationId: activeAgentConversation } = useAgentClient();
-  const agentConversations = useMemo(() => conversations.filter(conversation => conversation.messageCount > 0), [conversations]);
-  const [agentError, setAgentError] = useState('');
   const [nowMs, setNowMs] = useState(Date.now);
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 60_000);
@@ -196,8 +192,8 @@ export function HistoryBoard() {
   // flag is set on Escape so onBlur knows to skip the save. Reset each edit.
   const cancelRenameRef = useRef(false);
   const [ctxMenu, setCtxMenu] = useState<SessionCtxMenuState | null>(null);
-  useEffect(() => { prefetchHistory(); refreshAgentConversations().catch(() => {}); }, []);
-  const isLoading = isTauri && (status === 'idle' || status === 'loading') && cachedSessions.length === 0 && agentConversations.length === 0;
+  useEffect(() => { prefetchHistory(); }, []);
+  const isLoading = isTauri && (status === 'idle' || status === 'loading') && cachedSessions.length === 0;
 
   const [sessionSearchQuery, setSessionSearchQuery] = useState('');
   // Project (workspace) filter dropdown: which cwd's sessions to show
@@ -263,10 +259,7 @@ export function HistoryBoard() {
     { id: 'mock-2', name: 'build a snake game', tool: 'claude', cwd: '~/projects/snake', session_token: 'tk2', saved_at: new Date(nowMs - 3600000).toISOString() },
     { id: 'mock-3', name: 'refactor components', tool: 'qwen', cwd: '~/projects/coffee', session_token: 'tk3', saved_at: new Date(nowMs - 86400000 * 2).toISOString() },
   ], [cachedSessions, nowMs]);
-  const baseSessions: SavedSession[] = useMemo(() => sortByMtime([...nativeSessions, ...agentConversations.map(conversation => ({
-    id: conversation.id, name: conversation.title, tool: 'coffee-agent', cwd: '', session_token: null,
-    saved_at: new Date(conversation.updatedAt).toISOString(), turn_count: conversation.messageCount,
-  }))]), [nativeSessions, agentConversations]);
+  const baseSessions: SavedSession[] = useMemo(() => sortByMtime(nativeSessions), [nativeSessions]);
 
   // Project (workspace) filter: which cwd's sessions to show (null = all).
   // Keyed by normalized cwd (trailing slashes trimmed, separators unified —
@@ -309,20 +302,20 @@ export function HistoryBoard() {
     };
   }, [projectCounts]);
 
-  // Same auto-reset discipline as the agent filter. Also closes the portaled
+  // Auto-reset an invalid filter selection. Also closes the portaled
   // menu if the trigger is about to unmount: soft-deleting sessions down to
   // <2 projects makes projectCounts.length drop below the render threshold,
   // the trigger vanishes, and the fixed-position menu would otherwise strand
   // at stale screen coordinates.
   /* eslint-disable react-hooks/set-state-in-effect -- Invalid filter selections are reset when the available project set changes. */
   useEffect(() => {
-    if (projectCounts.length < 2 && agentConversations.length === 0 && filterMenuOpen) {
+    if (projectCounts.length < 2 && filterMenuOpen) {
       setFilterMenuOpen(false);
     }
-    if (activeProject && activeProject !== 'coffee-agent' && !projectCounts.some(p => p.key === activeProject)) {
+    if (activeProject && !projectCounts.some(p => p.key === activeProject)) {
       setActiveProject(null);
     }
-  }, [projectCounts, activeProject, filterMenuOpen, agentConversations.length]);
+  }, [projectCounts, activeProject, filterMenuOpen]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Debounce the raw query so fast typing doesn't re-filter the full session
@@ -361,7 +354,7 @@ export function HistoryBoard() {
     }
     // Project (cwd) filter — AND semantics with the text query below.
     if (activeProject) {
-      list = activeProject === 'coffee-agent' ? list.filter(s => s.tool === 'coffee-agent') : list.filter(s => !!s.cwd && normCwd(s.cwd) === activeProject);
+      list = list.filter(s => !!s.cwd && normCwd(s.cwd) === activeProject);
     }
     const q = debouncedQuery.trim().replace(/\s+/g, ' ').toLowerCase();
     if (q) {
@@ -375,7 +368,7 @@ export function HistoryBoard() {
         const name = ((renamed[k] ?? generated) || s.name || '').toLowerCase();
         const original = (s.name ?? '').toLowerCase();
         const proj = projectName(s.cwd ?? '', s.tool ?? '').toLowerCase();
-        const tool = s.tool === 'coffee-agent' ? 'coffee agent' : getToolName(s.tool ?? '').toLowerCase();
+        const tool = getToolName(s.tool ?? '').toLowerCase();
         return name.includes(q) || original.includes(q) || proj.includes(q) || tool.includes(q);
       });
     }
@@ -483,24 +476,19 @@ export function HistoryBoard() {
     const messages = session.turn_count
       ? ` · ${(t('task.messages') || '{count} messages').replace('{count}', session.turn_count.toString())}`
       : '';
-    // Agent conversations live in the agent service, not on disk — they get
-    // no tool icon, a fixed meta label, and no row context menu.
-    const isAgent = session.tool === 'coffee-agent';
     return (
       <SessionCard
         key={`${rowKey}:${session.file_path ?? session.saved_at}`}
         hideLabel={t('menu.delete')}
-        active={isAgent && session.id === activeAgentConversation && state.agentPageActive === 'agent'}
         displayName={displayedName(session)}
-        toolIcon={isAgent ? null : getToolIcon(session.tool)}
-        metaText={`${isAgent ? 'Coffee Agent' : projectName(session.cwd, session.tool)} · ${dateLabel(session)}${messages}`}
+        toolIcon={getToolIcon(session.tool)}
+        metaText={`${projectName(session.cwd, session.tool)} · ${dateLabel(session)}${messages}`}
         isRenaming={renamingKey === rowKey}
         renameValue={renameValue}
         onOpen={() => handleViewHistory(session)}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          if (isAgent) return;
           setCtxMenu({ session, x: e.clientX, y: e.clientY });
         }}
         onRenameChange={setRenameValue}
@@ -530,12 +518,6 @@ export function HistoryBoard() {
   };
 
   const handleViewHistory = (saved: SavedSession) => {
-    if (saved.tool === 'coffee-agent') {
-      setAgentError('');
-      dispatch({ type: 'OPEN_AGENT_PAGE', page: 'agent' });
-      openAgentConversation(saved.id).catch(error => setAgentError(String(error)));
-      return;
-    }
     // Click = resume directly. The old flow opened an intermediate read-only
     // preview and made the user click "Continue this session"
     // inside it; that intermediate step was slower than just resuming —
@@ -574,7 +556,7 @@ export function HistoryBoard() {
         {/* Project (workspace) filter dropdown, keyed by normalized cwd.
             Only worth the control when 2+ distinct projects exist. Shows the
             active project's folder icon + name. */}
-        {(projectCounts.length >= 2 || agentConversations.length > 0) && (
+        {projectCounts.length >= 2 && (
           <button
             ref={filterTriggerRef}
             type="button"
@@ -585,7 +567,7 @@ export function HistoryBoard() {
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
             </svg>
             <span className="history-tool-filter-label">
-              {activeProject === 'coffee-agent' ? 'Coffee Agent' : activeProject
+              {activeProject
                 ? projectLabel(projectCounts.find(p => p.key === activeProject)?.cwd ?? '')
                 : (t('task.filter_all_projects') || 'All projects')}
             </span>
@@ -595,7 +577,6 @@ export function HistoryBoard() {
           </button>
         )}
       </div>
-      {agentError && <p className="agent-feedback error" role="alert">{agentError}</p>}
       <div className="task-list" style={{ marginTop: '0', paddingBottom: '20px' }}>
       {isLoading && Array.from({ length: 6 }).map((_, i) => (
         <div key={`skel-${i}`} className="history-card history-card-skeleton" aria-hidden="true">
@@ -726,10 +707,6 @@ export function HistoryBoard() {
               <span className="history-tool-filter-count">{p.count}</span>
             </button>
           ))}
-          {agentConversations.length > 0 && <button type="button" className={`history-tool-filter-opt${activeProject === 'coffee-agent' ? ' active' : ''}`} onClick={() => { setActiveProject('coffee-agent'); setFilterMenuOpen(false); }}>
-            <span className="history-tool-filter-opt-name">Coffee Agent</span>
-            <span className="history-tool-filter-count">{baseSessions.filter(s => s.tool === 'coffee-agent' && !hidden.has(`coffee-agent:${s.id}`)).length}</span>
-          </button>}
         </div>
       </>,
       document.body

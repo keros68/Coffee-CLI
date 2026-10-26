@@ -3,7 +3,6 @@ import { createPortal } from 'react-dom';
 import { focusTerminal } from '../../lib/focus-registry';
 import { onWindowForeground } from '../../lib/window-focus-filter';
 import { TierTerminal } from './TierTerminal';
-import { AgentPages } from '../agent/AgentPages';
 import { ConversationView } from './ConversationView';
 import { FourSplitGrid } from './FourSplitGrid';
 import { ToolConfigModal } from './ToolConfigModal';
@@ -509,7 +508,6 @@ export function CenterPanel() {
   // whether it (not a terminal tab) is the focused surface.
   const diffTabVisible = state.diffMode === 'tab' && state.diffSelection !== null;
   const diffTabActive = state.diffTabActive;
-  const agentPageActive = state.agentPageActive;
   // Diff tab title = basename of the selected file (mirrors DiffPanel's own
   // header name). Computed here so the chrome-tab strip shows it without
   // mounting the DiffPanel body.
@@ -782,8 +780,8 @@ export function CenterPanel() {
   // TierTerminal added its own focusin + mouseup handlers, causing O(N)
   // dispatch per click with N tabs). When focus wanders to the body or a
   // non-input element, steal it back for the currently active terminal.
-  const activeIdRef = useRef(agentPageActive || diffTabActive ? null : activeTerminalId);
-  useEffect(() => { activeIdRef.current = agentPageActive || diffTabActive ? null : activeTerminalId; }, [activeTerminalId, agentPageActive, diffTabActive]);
+  const activeIdRef = useRef(diffTabActive ? null : activeTerminalId);
+  useEffect(() => { activeIdRef.current = diffTabActive ? null : activeTerminalId; }, [activeTerminalId, diffTabActive]);
   useEffect(() => {
     const enforce = () => {
       setTimeout(() => {
@@ -1118,11 +1116,7 @@ export function CenterPanel() {
       tabDragSuppressClickRef.current = false;
       return;
     }
-    if (tabId === 'agent:agent' || tabId === 'agent:config') {
-      dispatch({ type: 'OPEN_AGENT_PAGE', page: tabId === 'agent:agent' ? 'agent' : 'config' });
-    } else {
-      dispatch({ type: 'SET_ACTIVE_TERMINAL', id: tabId });
-    }
+    dispatch({ type: 'SET_ACTIVE_TERMINAL', id: tabId });
   };
 
   const getTabDragStyle = (tabId: string, visibleIndex: number): React.CSSProperties | undefined => {
@@ -1342,7 +1336,7 @@ export function CenterPanel() {
   return (
     <>
       {tabSlot && createPortal(
-      <div ref={tabsHeaderRef} className="chrome-tabs-header" data-count={terminals.filter(s => !s.isHidden || s.id === activeTerminalId).length + state.agentPages.length}>
+      <div ref={tabsHeaderRef} className="chrome-tabs-header" data-count={terminals.filter(s => !s.isHidden || s.id === activeTerminalId).length}>
         {(() => {
           const sessions = new Map(terminals.map(session => [session.id, session]));
           const visibleTabs = getTabOrder(state).filter(id => {
@@ -1352,28 +1346,12 @@ export function CenterPanel() {
           return visibleTabs.map((tabId, visibleIndex) => {
           const isDragging = tabDrag?.tabId === tabId;
           const dragStyle = getTabDragStyle(tabId, visibleIndex);
-          if (tabId === 'agent:agent' || tabId === 'agent:config') {
-            const page = tabId === 'agent:agent' ? 'agent' : 'config';
-            return (
-              <div key={tabId} data-tab-id={tabId}
-                className={`chrome-tab ${agentPageActive === page ? 'active' : ''} ${isDragging ? 'dragging' : ''}`}
-                style={dragStyle} onClick={() => onTabClickGuarded(tabId)}
-                onPointerDown={event => onTabPointerDown(event, tabId)}>
-                <span className="tab-title">{page === 'agent' ? 'Coffee Agent' : t('agent.page.settings')}</span>
-                <div className="tab-actions tab-actions--close-only">
-                  <button type="button" className="tab-close-btn" aria-label={t(page === 'agent' ? 'agent.page.close_agent' : 'agent.page.close_settings')} onClick={event => { event.stopPropagation(); dispatch({ type: 'CLOSE_AGENT_PAGE', page }); }}>
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m18 6-12 12M6 6l12 12" /></svg>
-                  </button>
-                </div>
-              </div>
-            );
-          }
           const session = sessions.get(tabId)!;
 
           // A terminal tab is "active" only when it's the focused surface —
           // when the diff tab is focused (diffTabActive), no terminal tab
           // should show the active highlight (the diff chrome-tab does).
-          const isActive = session.id === activeTerminalId && !diffTabActive && !agentPageActive;
+          const isActive = session.id === activeTerminalId && !diffTabActive;
           const { icon, title: baseTitle } = renderTabContent(session, isActive);
           // Tool's live OSC 0/2 title (Claude Code conversation summary, etc.)
           // overrides the cwd basename when the tool has set a non-empty one.
@@ -1475,7 +1453,7 @@ export function CenterPanel() {
               // Hide every terminal wrapper while the diff tab is focused —
               // the diff surface takes over the content area (the underlying
               // PTYs stay mounted, just not displayed).
-              display: (t.id === activeTerminalId && !diffTabActive && !agentPageActive) ? 'flex' : 'none',
+              display: (t.id === activeTerminalId && !diffTabActive) ? 'flex' : 'none',
               width: '100%',
               height: '100%',
               position: 'relative'
@@ -1518,12 +1496,11 @@ export function CenterPanel() {
                       toolName={AGENT_CATALOG.find(a => a.key === t.tool)?.label}
                       theme={state.currentTheme}
                       lang={state.currentLang}
-                      isActive={t.id === activeTerminalId && !diffTabActive && !agentPageActive && (!supportsConversationTool(t.tool) || t.viewMode !== 'chat')}
-                      conversationActive={t.id === activeTerminalId && !diffTabActive && !agentPageActive && supportsConversationTool(t.tool) && t.viewMode === 'chat'}
+                      isActive={t.id === activeTerminalId && !diffTabActive && (!supportsConversationTool(t.tool) || t.viewMode !== 'chat')}
+                      conversationActive={t.id === activeTerminalId && !diffTabActive && supportsConversationTool(t.tool) && t.viewMode === 'chat'}
                       toolData={t.toolData}
                       folderPath={t.folderPath}
                       resumeToken={t.resumeToken}
-                      strictCwd={t.strictCwd}
                       hasBg={hasBg && (!supportsConversationTool(t.tool) || t.viewMode !== 'chat')}
                       bgUrl={supportsConversationTool(t.tool) && t.viewMode === 'chat' ? '' : bgUrl}
                       bgType={bgType}
@@ -1547,7 +1524,7 @@ export function CenterPanel() {
                         startedAt={t.startedAt}
                         pending={t.chatPending}
                         agentStatus={t.agentStatus}
-                        isActive={t.id === activeTerminalId && !diffTabActive && !agentPageActive && (t.viewMode === 'chat' || Boolean(t.chatPending))}
+                        isActive={t.id === activeTerminalId && !diffTabActive && (t.viewMode === 'chat' || Boolean(t.chatPending))}
                         isVisible={t.viewMode === 'chat'}
                         onPendingResolved={() => dispatch({ type: 'SET_CHAT_PENDING', id: t.id })}
                         onPasteToDraft={(text) => dispatch({ type: 'APPEND_GAMBIT_DRAFT', id: t.id, text })}
@@ -1595,13 +1572,7 @@ export function CenterPanel() {
           </div>
         )}
 
-        {state.agentPages.map(page => (
-          <div key={page} className="terminal-wrapper" style={{ display: agentPageActive === page ? 'flex' : 'none', width: '100%', height: '100%' }}>
-            <AgentPages page={page} />
-          </div>
-        ))}
-
-        {isLaunchpadMode && activeTerminalId && !diffTabActive && !agentPageActive && (
+        {isLaunchpadMode && activeTerminalId && !diffTabActive && (
           <div className={`launchpad-container${hasBg && bgUrl ? ' launchpad-has-bg' : ''}`} style={{ position: 'relative' }}>
             {hasBg && bgUrl && (
               <div className="launchpad-bg">

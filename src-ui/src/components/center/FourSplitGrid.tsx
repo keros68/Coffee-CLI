@@ -165,7 +165,7 @@ export function FourSplitGrid({ tab, hasBg, bgUrl, bgType, paneCount = 4 }: Prop
       {visiblePanes.map((pane) => {
         const paneSid = paneSessionId(tab.id, pane.paneIdx, 'split');
         const isEmpty = pane.tool === null;
-        const isFocused = focusedPaneIdx === pane.paneIdx && state.activeTerminalId === tab.id && !state.agentPageActive && !state.diffTabActive;
+        const isFocused = focusedPaneIdx === pane.paneIdx && state.activeTerminalId === tab.id && !state.diffTabActive;
         const isDimmed = focusedPaneIdx !== null && !isFocused;
         // mousedown fires for clicks; focus covers keyboard tab-nav.
         // Empty panes leave Explorer on its current folder (no flash).
