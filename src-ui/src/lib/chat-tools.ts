@@ -4,8 +4,11 @@ const ENHANCED_TOOLS = new Set<ToolType>([
   'claude', 'codex', 'kimicode',
 ]);
 
+// Kimi Code paints an inverse-video caret and hides the terminal cursor.
+// Claude Code and Codex move the real terminal cursor to the input instead,
+// so they must keep it visible.
 const SELF_RENDERED_CARET_TOOLS = new Set<ToolType>([
-  'claude', 'codex', 'kimicode',
+  'kimicode',
 ]);
 
 /** Tools with source-grounded enhanced integration. All other tools stay

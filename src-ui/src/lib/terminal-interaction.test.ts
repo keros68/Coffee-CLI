@@ -586,9 +586,9 @@ export function main(): void {
   for (const tool of ['claude', 'codex', 'kimicode'] as const) {
     equal(supportsTerminalInteraction(tool), true, `${tool}: Coffee interaction enabled`);
     equal(supportsConversationTool(tool), true, `${tool}: conversation mode enabled`);
-    equal(usesSelfRenderedCaret(tool), true, `${tool}: upstream TUI owns its caret`);
   }
-  for (const tool of ['qwen', 'antigravity', 'terminal', 'remote', null] as const) {
+  equal(usesSelfRenderedCaret('kimicode'), true, 'kimicode: upstream TUI owns its caret');
+  for (const tool of ['claude', 'codex', 'qwen', 'antigravity', 'terminal', 'remote', null] as const) {
     equal(usesSelfRenderedCaret(tool), false, `${tool}: xterm cursor remains visible`);
   }
 

@@ -36,7 +36,7 @@ import { parseCodexTerminalTitle } from '../../lib/codex-terminal-title';
 import { parseOmpTerminalTitle } from '../../lib/omp-terminal-title';
 import { parseOpenCodeTerminalTitle } from '../../lib/opencode-terminal-title';
 import { markNotifySoundPromptSubmitted } from '../../lib/notify-sound';
-import { usesSelfRenderedCaret } from '../../lib/chat-tools';
+import { supportsEnhancedTool, usesSelfRenderedCaret } from '../../lib/chat-tools';
 import { onWindowForeground } from '../../lib/window-focus-filter';
 import { createTerminalSizeSync, DEFAULT_TERMINAL_GRID } from '../../lib/terminal-size-sync';
 import { UI_SCALE_CHANGED } from '../../lib/ui-scale';
@@ -537,6 +537,10 @@ function TierTerminalImpl({
       // no-op for the renderer. The win is that the redraw stops; in raw
       // shells the caret simply hides while the terminal is unfocused.
       cursorInactiveStyle: 'none',
+      // Agent prompts edit text mid-line; a bar sits between characters
+      // instead of covering the one under it. Raw shells keep the block.
+      cursorStyle: supportsEnhancedTool(tool) ? 'bar' : 'block',
+      cursorWidth: 2,
       scrollback: 5000,
       // Required to load Unicode11Addon below (xterm 6 gates the unicode
       // provider API as proposed). No other proposed API is used.
