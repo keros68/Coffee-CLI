@@ -1,9 +1,9 @@
-// session-autoname.ts — auto-generated session titles (`项目｜目标`).
+// session-autoname.ts — auto-generated session titles (a short goal phrase).
 //
 // The session list shows each CLI's own title, which is the first user message
 // truncated to 40 chars. Once a few dozen sessions pile up (across several
 // tools and projects) those titles stop being tellable apart. This module
-// generates a title on its own: project name + a cleaned-up goal phrase.
+// generates a title on its own: a cleaned-up goal phrase.
 //
 // Trigger and identity are deliberately NOT tied to a terminal tab:
 //   • Only 4 of the ~20 supported tools publish live working/idle state
@@ -22,14 +22,13 @@
 // stripped, cut at a clause boundary. Abstracting "修复写入失败" into the
 // enduring goal "草稿写入稳定性" needs semantics, which a rule table cannot
 // supply (trying leads to a table of awkward rephrasings). The title therefore
-// reads as a cleaned task, not as a goal state. The project prefix is what
-// makes a long list scannable; a manual rename covers the rest.
+// reads as a cleaned task, not as a goal state. The card's meta line names
+// the project; a manual rename covers the rest.
 
 import { isTauri } from '../tauri';
 import type { SavedSession } from '../tauri';
 import { getHistorySnapshot, savedAtMs, subscribeHistory } from './history-cache';
 import { getCustomName } from './renamed-sessions';
-import { projectLabel } from './session-groups';
 import {
   getAutoName,
   isAutoNameOptedOut,
@@ -141,8 +140,6 @@ const BARE_PATH = /^(?:[a-zA-Z]:[\\/]|\\\\|\/|~[\\/]|\.{1,2}[\\/]|https?:\/\/)\S
  *  as the visible remainder when a tag was glued to the front. */
 const INJECTED_PREFIX = /^(caveat:|the messages below|this session is being continued|below is a conversation)/i;
 
-const CJK = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uff00-\uffef]/;
-
 function stripFillers(s: string): string {
   let out = s;
   // A message can open with several of these ("麻烦 请你帮我 看一下…"), and a
@@ -237,17 +234,11 @@ export function goalPhrase(rawTitle: string): string | null {
   return s.length >= 2 ? s : null;
 }
 
-/** Build the display title for one session: `项目｜目标`. Null when the
+/** Build the display title for one session: its goal phrase. Null when the
  *  session has nothing to work from (no recorded title, or no title beyond a
  *  pasted path). */
 export function buildAutoName(session: SavedSession): string | null {
-  const phrase = goalPhrase(session.name ?? '');
-  if (!phrase) return null;
-  const project = projectLabel(session);
-  // Already self-describing — don't repeat the folder name in front of it.
-  if (!project || phrase.toLowerCase().startsWith(project.toLowerCase())) return phrase;
-  const separator = CJK.test(project) || CJK.test(phrase) ? '｜' : ' | ';
-  return `${project}${separator}${phrase}`;
+  return goalPhrase(session.name ?? '');
 }
 
 /** True when this row is ready to be named: quiet long enough to count as a

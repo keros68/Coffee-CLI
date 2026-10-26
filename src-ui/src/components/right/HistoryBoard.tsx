@@ -25,6 +25,7 @@ import {
   deleteGroup,
   setGroupCollapsed,
   setGroupRule,
+  stripProjectPrefix,
   type SessionGroup,
 } from '../../lib/session-groups';
 import { SessionCard, SessionSectionHeader } from './SessionCard';
@@ -329,11 +330,14 @@ export function HistoryBoard() {
   }, [sessionSearchQuery]);
 
   // Title on screen for one row: manual rename > auto name > the tool's own
-  // title. Used by the card and by the rename draft.
+  // title. Used by the card and by the rename draft. A manual name is shown
+  // as typed; the others drop a leading project prefix the meta line repeats.
   const displayedName = (s: SavedSession) => {
     const k = `${s.tool ?? ''}:${s.id}`;
+    const manual = renamed[k];
+    if (manual != null) return manual;
     const generated = autoNameOn ? autoNamed[k] : undefined;
-    return renamed[k] ?? generated ?? s.name;
+    return stripProjectPrefix(generated ?? s.name, s);
   };
 
   // Normalize once: trim + collapse runs of whitespace + lowercase. Empty after

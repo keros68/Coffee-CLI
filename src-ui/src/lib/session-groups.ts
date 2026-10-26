@@ -209,17 +209,39 @@ export function resolveGroupId(
  *  user would recognise. */
 const CWD_AGNOSTIC_TOOLS = new Set(['openclaw', 'hermes', 'remote']);
 
-/** Project folder name of a session ("coffeecli" from "D:\work\coffeecli").
+/** Full project folder name of a session ("coffeecli" from "D:\work\coffeecli").
  *  Null when the session has no project behind it, including a cwd that is a
  *  drive or filesystem root, where the basename ("C:") says nothing. */
-export function projectLabel(session: { tool?: string | null; cwd?: string | null }): string | null {
+function projectFolder(session: { tool?: string | null; cwd?: string | null }): string | null {
   if (CWD_AGNOSTIC_TOOLS.has(session.tool ?? '')) return null;
   const cwd = (session.cwd ?? '').replace(/[\\/]+$/, '');
   if (!cwd) return null;
   const idx = Math.max(cwd.lastIndexOf('\\'), cwd.lastIndexOf('/'));
   const base = (idx >= 0 ? cwd.slice(idx + 1) : cwd).trim();
   if (!base || /^[a-zA-Z]:$/.test(base) || /^[.~]+$/.test(base) || /^[\\/]+$/.test(base)) return null;
-  return base.length > 16 ? base.slice(0, 16) : base;
+  return base;
+}
+
+/** Project folder name, cut to 16 characters for section names. */
+export function projectLabel(session: { tool?: string | null; cwd?: string | null }): string | null {
+  const base = projectFolder(session);
+  return base && base.length > 16 ? base.slice(0, 16) : base;
+}
+
+/** Drop a leading `项目｜` / `project | ` from a title. The card's meta line
+ *  already names the project, so the prefix (from older auto names or an
+ *  agent's own `模块｜目标` title) would print it twice. Matches the full folder
+ *  name and the 16-character label older auto names used. */
+export function stripProjectPrefix(title: string, session: { tool?: string | null; cwd?: string | null }): string {
+  const full = projectFolder(session);
+  if (!full || !title) return title;
+  const lower = title.toLowerCase();
+  for (const project of new Set([full, projectLabel(session) ?? full])) {
+    if (!lower.startsWith(project.toLowerCase())) continue;
+    const rest = title.slice(project.length).replace(/^\s*[｜|]\s*/, '');
+    if (rest !== title.slice(project.length) && rest.trim()) return rest;
+  }
+  return title;
 }
 
 /** Bucket id of the "not in any section" remainder. Never a real group id. */

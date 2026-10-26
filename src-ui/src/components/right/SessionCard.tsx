@@ -42,6 +42,7 @@ export function SessionCard({
     <div className="history-card" onClick={onOpen} onContextMenu={onContextMenu}>
       <div className="history-card-content">
         <div className="history-card-title-row">
+          <span className="history-card-icon">{toolIcon}</span>
           {isRenaming ? (
             <input
               className="history-card-rename-input"
@@ -88,10 +89,7 @@ export function SessionCard({
           )}
         </div>
         <div className="history-card-meta">
-          <span className="history-card-tool-wrap">
-            {toolIcon}
-            <span className="history-card-meta-text">{metaText}</span>
-          </span>
+          <span className="history-card-meta-text">{metaText}</span>
         </div>
       </div>
     </div>

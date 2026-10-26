@@ -477,7 +477,7 @@ export function App() {
   // pay only the 60s setInterval tick (a function call that early-returns).
   useEffect(() => initHistoryAutoRefresh(), []);
 
-  // Auto-generated session titles (`项目｜目标`). Subscribes to the same history
+  // Auto-generated session titles (a short goal phrase). Subscribes to the same history
   // store: a session that has been quiet for a while is a finished first turn,
   // so it gets named once and then stays frozen (see lib/session-autoname.ts).
   // No-ops outside Tauri and while the Settings ▸ Sessions toggle is off.
