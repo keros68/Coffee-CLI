@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>xterm WebGL shared atlas repro</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.19.0/lib/addon-webgl.js"></script>
+<style>
+  body { margin: 16px; background: #1e1e1e; color: #ddd; font: 14px system-ui, sans-serif; }
+  .term { width: 640px; height: 110px; margin: 4px 0 12px; }
+  button { margin-right: 8px; padding: 6px 12px; }
+  #log { white-space: pre-wrap; color: #9cdcfe; }
+</style></head>
+<body>
+<p>Two terminals with identical options, so addon-webgl gives them one shared texture atlas.
+Same versions as Coffee CLI: @xterm/xterm 6.0.0, @xterm/addon-webgl 0.19.0.</p>
+<div>Terminal A</div><div id="a" class="term"></div>
+<div>Terminal B</div><div id="b" class="term"></div>
+<button id="one">1. clearTextureAtlas() on A only</button>
+<button id="all">2. clearTextureAtlas() on A and B</button>
+<div id="log"></div>
+<script>
+const log = s => { document.getElementById('log').textContent += s + '\n'; };
+function make(id) {
+  const term = new Terminal({ cols: 72, rows: 5, fontSize: 14 });
+  term.open(document.getElementById(id));
+  const webgl = new WebglAddon.WebglAddon();
+  term.loadAddon(webgl);
+  return { term, webgl };
+}
+const A = make('a'), B = make('b');
+const nextRender = t => new Promise(r => { const d = t.onRender(() => { d.dispose(); r(); }); });
+const glCanvas = id => [...document.querySelectorAll('#' + id + ' canvas')].sort((x, y) => y.width - x.width)[0];
+const snapB = () => glCanvas('b').toDataURL();
+
+A.term.write('Terminal A: zyxwvu 9876 QWERTY');
+B.term.write('Error: Connection error. /Users/demo Task 0.2s\r\nabcdefghijklmnopqrstuvwxyz 0123456789');
+
+// Step 1: rebuild the shared atlas from A, draw a few new glyphs in A, then let B
+// render once (one changed cell). B's unchanged cells still point at the old
+// atlas layout and show the wrong glyphs.
+async function clearOnAOnly() {
+  A.webgl.clearTextureAtlas();
+  A.term.write('\r\nA draws new glyphs after the rebuild: !@#$%^&*()');
+  await nextRender(A.term);
+  B.term.write('\x1b[5;1H.');
+  await nextRender(B.term);
+  window.afterAOnly = snapB();
+  log('Step 1 done: B now shows wrong glyphs although its content did not change.');
+}
+// Step 2: the same rebuild run on every terminal that shares the atlas.
+async function clearOnAll() {
+  A.webgl.clearTextureAtlas();
+  B.webgl.clearTextureAtlas();
+  B.term.write('\x1b[5;2H.');
+  await nextRender(B.term);
+  window.afterAll = snapB();
+  log('Step 2 done: B is correct again.');
+}
+document.getElementById('one').onclick = clearOnAOnly;
+document.getElementById('all').onclick = clearOnAll;
+
+// ?auto runs both steps and records B's canvas before/after for screenshots.
+if (location.search.includes('auto')) {
+  (async () => {
+    await new Promise(r => setTimeout(r, 500));
+    B.term.refresh(0, 4); await nextRender(B.term);
+    window.before = snapB();
+    await clearOnAOnly();
+    await clearOnAll();
+    document.title = 'done';
+  })();
+}
+</script>
+</body></html>
