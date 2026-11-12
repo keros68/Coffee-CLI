@@ -128,18 +128,9 @@ export interface MultiAgentPane {
   tool: ToolType;
   toolData?: string;
   agentStatus?: AgentStatus;
-  // Per-pane working directory. Only used by the four-split (independent quad) tab
-  // where each pane can run in its own project. Multi-agent panes ignore this
-  // and use the tab-level folderPath (all 4 panes share one workspace because
-  // they coordinate via MCP against that workspace's config).
+  // Per-pane working directory. Only used by the independent split tabs
+  // where each pane can run in its own project.
   folderPath?: string | null;
-  // Sentinel Protocol (opt-in per pane). When true, TierTerminal scans the
-  // PTY output stream of this pane for the marker `[COFFEE-DONE:pane<N>]`
-  // that the user instructs their agent to emit on task completion. On a
-  // match, completionTs is set to Date.now() — the pane number badge
-  // renders a small green dot while the timestamp is fresh.
-  sentinelEnabled?: boolean;
-  completionTs?: number;
 }
 
 /// State attached to a Tab with `tool === 'multi-agent'`. All four panes
@@ -355,7 +346,6 @@ type Action =
   | { type: 'SET_TERMINAL_TOOL'; id: string; tool: ToolType; toolData?: string; resumeToken?: string }
   | { type: 'SET_TERMINAL_HIDDEN'; id: string; isHidden: boolean }
   | { type: 'RESTART_TERMINAL'; id: string; newId: string }
-  | { type: 'OPEN_HYPER_AGENT_TAB' }
   | { type: 'SET_AGENT_STATUS'; id: string; status: AgentStatus | undefined }
   | { type: 'SET_BG'; path: string; bgType: 'image' | 'video' }
   | { type: 'CLEAR_BG' }
@@ -374,8 +364,6 @@ type Action =
   | { type: 'SET_SESSION_VIEW'; id: string; viewMode: 'terminal' | 'chat' }
   | { type: 'SET_CHAT_PENDING'; id: string; pending?: { text: string; sentAt: number } }
   | { type: 'SET_PANE_TOOL'; tabId: string; paneIdx: number; tool: ToolType; toolData?: string; folderPath?: string | null }
-  | { type: 'SET_PANE_SENTINEL'; tabId: string; paneIdx: number; enabled: boolean }
-  | { type: 'SET_PANE_COMPLETION'; tabId: string; paneIdx: number; ts: number }
   | { type: 'SET_FOCUSED_PANE'; tabId: string; paneIdx: number | null }
   | { type: 'TOGGLE_LEFT_PANEL' }
   | { type: 'TOGGLE_RIGHT_PANEL' }
@@ -643,33 +631,6 @@ function reducer(state: AppState, action: Action): AppState {
                     : (action.tool === null ? null : p.folderPath),
                 }
               : p
-          );
-          return { ...t, multiAgent: { ...t.multiAgent, panes } };
-        }),
-      };
-    }
-    case 'SET_PANE_SENTINEL': {
-      return {
-        ...state,
-        terminals: state.terminals.map(t => {
-          if (t.id !== action.tabId) return t;
-          const existing = t.multiAgent?.panes
-            ?? ([1, 2, 3, 4].map(i => ({ paneIdx: i, tool: null as ToolType })) as MultiAgentPane[]);
-          const panes = existing.map(p =>
-            p.paneIdx === action.paneIdx ? { ...p, sentinelEnabled: action.enabled } : p
-          );
-          return { ...t, multiAgent: { ...t.multiAgent, panes } };
-        }),
-      };
-    }
-    case 'SET_PANE_COMPLETION': {
-      return {
-        ...state,
-        terminals: state.terminals.map(t => {
-          if (t.id !== action.tabId) return t;
-          if (!t.multiAgent) return t;
-          const panes = t.multiAgent.panes.map(p =>
-            p.paneIdx === action.paneIdx ? { ...p, completionTs: action.ts } : p
           );
           return { ...t, multiAgent: { ...t.multiAgent, panes } };
         }),

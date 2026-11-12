@@ -227,27 +227,127 @@ pub(crate) fn binary_on_path(bin: &str) -> bool {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_pathext_list() -> Vec<String> {
+    let raw = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let mut exts = Vec::new();
+    for item in raw.split(';') {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        let normalized = if lower.starts_with('.') {
+            lower
+        } else {
+            format!(".{lower}")
+        };
+        if !exts.contains(&normalized) {
+            exts.push(normalized);
+        }
+    }
+    if exts.is_empty() {
+        vec![".com".into(), ".exe".into(), ".bat".into(), ".cmd".into()]
+    } else {
+        exts
+    }
+}
+
+#[cfg(target_os = "windows")]
 pub(crate) fn check_tool_windows(bin: &str) -> bool {
-    use std::os::windows::process::CommandExt;
-    std::process::Command::new("where")
-        .arg(bin)
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    let Some(path_os) = std::env::var_os("PATH") else {
+        return false;
+    };
+    let exts = windows_pathext_list();
+    let has_dot = bin.contains('.');
+    for dir in std::env::split_paths(&path_os) {
+        if dir.as_os_str().is_empty() || !dir.is_dir() {
+            continue;
+        }
+        if has_dot && dir.join(bin).is_file() {
+            return true;
+        }
+        for ext in &exts {
+            if dir.join(format!("{bin}{ext}")).is_file() {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn check_tool_unix(bin: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(bin)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    use std::os::unix::fs::PermissionsExt;
+    let Some(path_os) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&path_os) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let candidate = dir.join(bin);
+        if let Ok(meta) = std::fs::metadata(&candidate) {
+            if meta.is_file() && (meta.permissions().mode() & 0o111 != 0) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Enumerate every executable name present on `PATH` in a single directory pass.
+/// Replaces spawning 22 sequential `where`/`which` subprocesses (~2.3s on Windows,
+/// especially when `PATH` contains disconnected drives).
+fn collect_path_binaries() -> std::collections::HashSet<String> {
+    let mut found = std::collections::HashSet::new();
+    let Some(path_os) = std::env::var_os("PATH") else {
+        return found;
+    };
+    #[cfg(target_os = "windows")]
+    let exts: std::collections::HashSet<String> = windows_pathext_list().into_iter().collect();
+
+    for dir in std::env::split_paths(&path_os) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_dir() {
+                continue;
+            }
+            let file_name = entry.file_name();
+            let Some(name_str) = file_name.to_str() else {
+                continue;
+            };
+            #[cfg(target_os = "windows")]
+            {
+                let lower = name_str.to_ascii_lowercase();
+                if let Some(dot_idx) = lower.rfind('.') {
+                    let ext = &lower[dot_idx..];
+                    if exts.contains(ext) {
+                        found.insert(lower[..dot_idx].to_string());
+                        found.insert(lower);
+                    }
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() && (meta.permissions().mode() & 0o111 != 0) {
+                        found.insert(name_str.to_string());
+                    }
+                }
+            }
+        }
+    }
+    found
 }
 
 /// Re-run legacy cleanup and any non-hook presentation migration for one tool.
@@ -271,9 +371,14 @@ fn take_pending_launch(state: State<'_, AppState>) -> Option<crate::launch::Laun
 
 #[tauri::command(async)]
 fn check_tools_installed() -> std::collections::HashMap<String, bool> {
-    let mut result = std::collections::HashMap::new();
+    let available = collect_path_binaries();
+    let mut result = std::collections::HashMap::with_capacity(crate::tools::TOOLS.len() + 1);
     for tool in crate::tools::TOOLS {
-        result.insert(tool.id.to_string(), binary_on_path(tool.binary_name));
+        #[cfg(target_os = "windows")]
+        let installed = available.contains(&tool.binary_name.to_ascii_lowercase());
+        #[cfg(not(target_os = "windows"))]
+        let installed = available.contains(tool.binary_name);
+        result.insert(tool.id.to_string(), installed);
     }
     // `terminal` (system shell) and `remote` (SSH) have no binary to
     // probe — always available, not registered.
@@ -6350,9 +6455,12 @@ pub fn start_ui(pending_launch: Option<crate::launch::LaunchRequest>) -> anyhow:
             crate::git::git_commit_files,
         ])
         .setup(|app| {
-            // Remove Coffee status hooks/plugins left by older releases.
-            // Current integrations are read-only terminal/title parsers.
-            crate::hook_installer::cleanup_all();
+            // Remove Coffee status hooks/plugins left by older releases off
+            // the main thread so legacy config sweeps / tasklist probes never
+            // stall window creation. Version-stamped after the first clean run.
+            let _ = std::thread::Builder::new()
+                .name("coffee-startup-cleanup".into())
+                .spawn(crate::hook_installer::cleanup_all);
 
             // Per-pane MCP servers are spawned lazily inside
             // `tier_terminal_start` when each multi-agent pane boots

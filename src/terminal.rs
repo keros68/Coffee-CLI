@@ -1050,8 +1050,7 @@ pub fn spawn(
             cwd: String,
         }
 
-        let ansi_re =
-            regex::Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\].*?(?:\x07|\x1b\\)|\x1b.").unwrap();
+        static ANSI_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
 
         let mut pending: Vec<u8> = Vec::with_capacity(131072);
         let mut token_captured = false;
@@ -1130,6 +1129,12 @@ pub fn spawn(
                 // Session token capture (once per session, for `--resume`).
                 if !token_captured {
                     if let Some(ref re) = session_id_regex {
+                        let ansi_re = ANSI_RE.get_or_init(|| {
+                            regex::Regex::new(
+                                r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\].*?(?:\x07|\x1b\\)|\x1b.",
+                            )
+                            .unwrap()
+                        });
                         let stripped = ansi_re.replace_all(&data, "");
                         if let Some(caps) = re.captures(&stripped) {
                             if let Some(token) = caps.get(1) {

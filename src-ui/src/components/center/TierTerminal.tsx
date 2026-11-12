@@ -375,13 +375,6 @@ interface TierTerminalProps {
   bgType?: 'image' | 'video' | 'none';
   termColorScheme?: string;
   termFont?: string;
-  /** Multi-agent only. When true, the backend wires this pane's
-   *  `coffee-cli` MCP server + injects the cross-pane protocol prompt
-   *  into the CLI's system instructions. When false (default), the
-   *  pane runs hands-free but with NO peer awareness — it shares only
-   *  the workspace folder with sibling panes. Ignored outside
-   *  multi-agent grids (single-terminal tabs always pass false). */
-  sentinelEnabled?: boolean;
 }
 
 interface RemoteTerminalConfig {
@@ -455,14 +448,6 @@ function TierTerminalImpl({
   const lastOutputAtRef = useRef(0);
   const [processExited, setProcessExited] = useState(false);
   const [startFailed, setStartFailed] = useState(false);
-  // Rolling buffer for agent-to-agent marker scanning. PTY chunks can split
-  // `[COFFEE-TELL:...]` / `[COFFEE-DONE:...]` across boundaries; the buffer
-  // reassembles chunks so markers match reliably. `markerScanOffsetRef`
-  // tracks how far we've already scanned to avoid re-firing the same
-  // dispatch when a later chunk arrives and re-triggers the scan. See the
-  // scanner in `onData` below for the consume/advance logic.
-  const markerScanBufRef = useRef<string>('');
-  const markerScanOffsetRef = useRef<number>(0);
 
   // ── Stale-frame ghost suppression on tab switch (issue #47) ──────────────
   // Inactive tabs are display:none (CenterPanel). While hidden, xterm's WebGL
@@ -1501,8 +1486,37 @@ function TierTerminalImpl({
           scheduleScreenIdle();
         }
       };
-      const parsedListener = term.onWriteParsed(scanTerminalSemantics);
+
+      // Coalesce high-frequency token-streaming repaints (~60 Hz) to ~12 Hz
+      // while keeping isolated interactive redraws (arrow-key menu focus,
+      // final prompt paint) immediate (leading + trailing 80 ms throttle).
+      const SEMANTIC_SCAN_INTERVAL_MS = 80;
+      let lastSemanticScanAt = 0;
+      let semanticScanTimer: number | undefined;
+      const cancelSemanticScan = () => {
+        if (semanticScanTimer === undefined) return;
+        window.clearTimeout(semanticScanTimer);
+        semanticScanTimer = undefined;
+      };
+      const scheduleSemanticScan = () => {
+        const now = performance.now();
+        const elapsed = now - lastSemanticScanAt;
+        if (elapsed >= SEMANTIC_SCAN_INTERVAL_MS && semanticScanTimer === undefined) {
+          lastSemanticScanAt = now;
+          scanTerminalSemantics();
+          return;
+        }
+        if (semanticScanTimer !== undefined) return;
+        semanticScanTimer = window.setTimeout(() => {
+          semanticScanTimer = undefined;
+          lastSemanticScanAt = performance.now();
+          scanTerminalSemantics();
+        }, Math.max(0, SEMANTIC_SCAN_INTERVAL_MS - elapsed));
+      };
+
+      const parsedListener = term.onWriteParsed(scheduleSemanticScan);
       unlisteners.push(() => parsedListener.dispose());
+      unlisteners.push(cancelSemanticScan);
       unlisteners.push(cancelInteractionClear);
       unlisteners.push(() => clearTerminalInteraction(sessionId));
     }
@@ -1632,98 +1646,6 @@ function TierTerminalImpl({
           }
           if (data.includes('\x1b[?1049l') || data.includes('\x1b[?47l')) {
             altScreenRef.current = false;
-          }
-
-          // ── Sentinel Protocol scanner ───────────────────────────
-          // Sentinel sits on TOP of MCP. Forward dispatch (pane A → pane B)
-          // is handled by the MCP `send_to_pane` tool (see mcp_server.rs)
-          // which gives the dispatching agent structured discovery +
-          // failure responses. What this scanner handles is the BACKWARD
-          // completion receipt:
-          //
-          //   [COFFEE-DONE:paneN->paneM]
-          //     pane N has finished a task and wants to notify pane M.
-          //     Gated by sentinelEnabled on BOTH panes (opt-in): with
-          //     sentinel on, the frontend lights a green dot on pane N's
-          //     badge AND injects "[From pane N] Task complete." + Enter
-          //     into pane M's PTY input, which wakes pane M's LLM turn
-          //     loop without polling. With sentinel off, the marker sits
-          //     inert in pane N's scrollback and the user has to eyeball
-          //     completion instead.
-          //
-          // We STRIP ANSI escape sequences before scanning. Claude Code's
-          // TUI wraps response text in CSI sequences (color, bold, cursor
-          // positioning, erase-line). Those bytes sit between marker
-          // literals and around the text, breaking any regex that treats
-          // the raw stream as plain text. Stripping CSI/OSC/single-char
-          // escapes normalises the buffer so the regex sees what the
-          // user sees.
-          //
-          // Buffer + offset:
-          //   - PTY onData is chunky (256B–4KB); markers can split across
-          //     chunks, so we accumulate into a buffer before scanning.
-          //   - 8 KB bound keeps the buffer from growing unbounded.
-          //   - `markerScanOffsetRef` advances past processed matches so
-          //     the same DONE never fires twice when a later chunk
-          //     re-triggers the scan.
-
-          // Strip CSI/OSC/single-char ANSI escapes from the chunk before
-          // appending. xterm still gets the raw `data` with escapes
-          // intact for rendering; only the scan buffer is normalised.
-          const cleanData = data
-            .replace(/\x1b\[[0-9;?]*[@-~]/g, '') // eslint-disable-line no-control-regex -- CSI contains ESC.
-            .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // eslint-disable-line no-control-regex -- OSC contains ESC/BEL.
-            .replace(/\x1b[@-Z\\-_]/g, ''); // eslint-disable-line no-control-regex -- Single-character ESC sequence.
-          markerScanBufRef.current += cleanData;
-
-          const MAX_BUF = 8192;
-          if (markerScanBufRef.current.length > MAX_BUF) {
-            const toTrim = markerScanBufRef.current.length - MAX_BUF;
-            markerScanBufRef.current = markerScanBufRef.current.slice(toTrim);
-            markerScanOffsetRef.current = Math.max(
-              0,
-              markerScanOffsetRef.current - toTrim
-            );
-          }
-
-          const unscanned = markerScanBufRef.current.slice(
-            markerScanOffsetRef.current
-          );
-          if (unscanned.includes('[COFFEE-DONE:pane')) {
-            const paneIdMatch = sessionId.match(/^(.+)::pane-(\d+)$/);
-            if (paneIdMatch) {
-              const tabId = paneIdMatch[1];
-              const tab = appStateRef.current.terminals.find(t => t.id === tabId);
-              const panes = tab?.multiAgent?.panes ?? [];
-              let advancedTo = 0;
-
-              // DONE: backward receipt, sentinel-gated on the emitter side.
-              const doneRegex = /\[COFFEE-DONE:pane(\d+)->pane(\d+)\]/g;
-              let doneM: RegExpExecArray | null;
-              while ((doneM = doneRegex.exec(unscanned)) !== null) {
-                const emitter = parseInt(doneM[1], 10);
-                const target = parseInt(doneM[2], 10);
-                const emitterPane = panes.find(p => p.paneIdx === emitter);
-                if (emitterPane?.sentinelEnabled) {
-                  dispatch({ type: 'SET_PANE_COMPLETION', tabId, paneIdx: emitter, ts: Date.now() });
-                  const targetPane = panes.find(p => p.paneIdx === target);
-                  if (targetPane?.sentinelEnabled && targetPane.tool !== null && target !== emitter) {
-                    const targetId = `${tabId}::pane-${target}`;
-                    const notify = `[From pane ${emitter}] Task complete.`;
-                    // `paste()` (see registerTabActions below) handles the
-                    // trailing CR — it schedules `\r` 30ms after the paste
-                    // so the TUI treats it as Enter rather than part of
-                    // the bracketed-paste buffer. Don't re-send the CR.
-                    getTabActions(targetId)?.paste(notify);
-                  }
-                }
-                advancedTo = Math.max(advancedTo, doneM.index + doneM[0].length);
-              }
-
-              if (advancedTo > 0) {
-                markerScanOffsetRef.current += advancedTo;
-              }
-            }
           }
         },
         onStatus: (running) => {

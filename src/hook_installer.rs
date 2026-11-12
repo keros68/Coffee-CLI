@@ -50,6 +50,16 @@ const OPENCODE_PLUGIN_FILENAME: &str = "coffee-cli-island.js";
 
 const HERMES_PLUGIN_NAME: &str = "coffee-cli-status";
 
+const CLEANUP_STAMP_SCHEMA: &str = "cleanup-v1";
+
+fn cleanup_stamp_path(home: &Path) -> PathBuf {
+    home.join(".coffee-cli").join("cache").join("cleanup-stamp.json")
+}
+
+/// Background startup entry point. Legacy hook + Orca residue sweeps only need
+/// to run once per Coffee CLI version (newly installed CLIs mid-session are
+/// covered by `maintain_for_tool`). The zero-spawn broken-npm-bin check still
+/// runs on every boot in case an external `opencode upgrade` shattered a shim.
 pub fn cleanup_all() {
     let home = match dirs::home_dir() {
         Some(h) => h,
@@ -58,18 +68,28 @@ pub fn cleanup_all() {
             return;
         }
     };
+    let expected_stamp = format!("{}:{}", CLEANUP_STAMP_SCHEMA, env!("CARGO_PKG_VERSION"));
+    let stamp_path = cleanup_stamp_path(&home);
+    let already_cleaned = fs::read_to_string(&stamp_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|v| v.get("stamp").and_then(Value::as_str).map(str::to_owned))
+        .as_deref()
+        == Some(expected_stamp.as_str());
 
-    for tool in crate::tools::TOOLS {
-        if tool.has_legacy_hook_artifacts {
-            cleanup_tool(tool, &home);
+    if !already_cleaned {
+        for tool in crate::tools::TOOLS {
+            if tool.has_legacy_hook_artifacts {
+                cleanup_tool(tool, &home);
+            }
         }
+        cleanup_orca(&home);
+        if let Some(parent) = stamp_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let payload = serde_json::json!({ "stamp": expected_stamp });
+        let _ = fs::write(&stamp_path, payload.to_string());
     }
-
-    // Orca (stablyai/orca) injects agent-status hooks into many CLIs and
-    // leaves the residue behind after uninstall; strip its fingerprint
-    // everywhere and delete its own directories. Gated on the Orca process
-    // not running (see cleanup_orca).
-    cleanup_orca(&home);
 
     // Windows-only: opencode/mimocode's `opencode upgrade` (which re-runs
     // `npm install -g`) shatters the global bin links when the binary is

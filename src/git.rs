@@ -11,8 +11,9 @@
 // pathspecs are consistently repo-root-relative even when the tab's folder is
 // a subdirectory (matches how an IDE's Source Control shows the whole repo).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -27,9 +28,44 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// close, so the list resets on reopen (no persistence / no counting — just a
 /// baseline hash per repo). Pattern matches terminal.rs's `JOB` OnceLock.
 static BASELINES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static BASELINED_FOLDERS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static REPO_ROOT_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static GIT_FOUND: AtomicBool = AtomicBool::new(false);
 
 fn baselines() -> &'static Mutex<HashMap<String, String>> {
     BASELINES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn baselined_folders() -> &'static Mutex<HashSet<String>> {
+    BASELINED_FOLDERS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn repo_root_cache() -> &'static Mutex<HashMap<String, String>> {
+    REPO_ROOT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn resolve_repo_root(folder: &str) -> Option<String> {
+    let key = crate::server::normalize_path_key(folder);
+    if let Ok(cache) = repo_root_cache().lock() {
+        if let Some(root) = cache.get(&key) {
+            return Some(root.clone());
+        }
+    }
+    let root = git_output(folder, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    if let Ok(mut cache) = repo_root_cache().lock() {
+        cache.insert(key, root.clone());
+    }
+    Some(root)
+}
+
+fn invalidate_repo_root(folder: &str) {
+    let key = crate::server::normalize_path_key(folder);
+    if let Ok(mut cache) = repo_root_cache().lock() {
+        cache.remove(&key);
+    }
 }
 
 /// Run `git -C <dir> <args>`, capturing stdout. Err on a missing binary or a
@@ -53,14 +89,18 @@ fn git_output(dir: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// True if a `git` binary is on PATH. Not cached because the changes panel
-/// invokes it only while its polling gate is active.
+/// True if a `git` binary is on PATH. Latches `true` once found so polls never
+/// spawn `git --version`; when `false`, re-checks via the zero-spawn Rust PATH
+/// scanner so installing Git while Coffee CLI is open still lights up live.
 fn git_on_path() -> bool {
-    let mut cmd = Command::new("git");
-    cmd.arg("--version");
-    #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+    if GIT_FOUND.load(Ordering::Relaxed) {
+        return true;
+    }
+    if crate::server::binary_on_path("git") {
+        GIT_FOUND.store(true, Ordering::Relaxed);
+        return true;
+    }
+    false
 }
 
 #[derive(serde::Serialize)]
@@ -299,32 +339,45 @@ pub fn git_changes(folder: String) -> GitChanges {
     if !git_on_path() {
         return GitChanges::NoGit;
     }
-    // Repo detection + canonical root in one shot (run from the tab folder,
-    // which may be a subdir). Failure here = not a work tree.
-    let repo_root = match git_output(&folder, &["rev-parse", "--show-toplevel"]) {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => return GitChanges::NotRepo,
+    // Repo detection + canonical root (cached per folder; invalidated if the
+    // subsequent status query fails, e.g. `.git` was removed).
+    let Some(repo_root) = resolve_repo_root(&folder) else {
+        return GitChanges::NotRepo;
+    };
+
+    // Porcelain v1, NUL-separated, every untracked file listed. Run before
+    // branch/numstat so a deleted `.git` fails fast and evicts the cached root.
+    let porcelain = match git_output(
+        &repo_root,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    ) {
+        Ok(out) => out,
+        Err(_) => {
+            invalidate_repo_root(&folder);
+            return GitChanges::NotRepo;
+        }
     };
 
     let branch = git_branch(&repo_root);
-    // HEAD↔worktree numstat folds staged + unstaged into the single "未提交"
-    // delta (the staged/unstaged split was collapsed 2026-07-06 — the audience
-    // doesn't manually `git add`, and "未暂存" was git jargon).
-    let uncommitted_counts = numstat_worktree_vs_head(&repo_root);
+    // Only run `git diff --numstat HEAD` when porcelain actually reports at
+    // least one tracked change — clean working trees and untracked-only edits
+    // skip the extra `git.exe` spawn completely.
+    let has_tracked_change = porcelain.split('\0').any(|rec| {
+        if rec.len() < 4 {
+            return false;
+        }
+        let b = rec.as_bytes();
+        let (x, y) = (b[0] as char, b[1] as char);
+        (x != ' ' && x != '?') || (y != ' ' && y != '?')
+    });
+    let uncommitted_counts = if has_tracked_change {
+        numstat_worktree_vs_head(&repo_root)
+    } else {
+        HashMap::new()
+    };
 
     let mut uncommitted = Vec::new();
     let mut untracked = Vec::new();
-
-    // Porcelain v1, NUL-separated, every untracked file listed. Each record is
-    // "XY <path>" where X = index/staged status, Y = worktree/unstaged status.
-    // With -z the path is raw (no C-quoting). A rename/copy (X or Y in {R,C})
-    // appends ONE extra NUL field — the origin path — which we consume so it
-    // isn't mis-parsed as its own entry.
-    let porcelain = git_output(
-        &repo_root,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )
-    .unwrap_or_default();
     let fields: Vec<&str> = porcelain.split('\0').collect();
     let mut i = 0;
     while i < fields.len() {
@@ -429,19 +482,34 @@ pub fn git_show_file(repo_root: String, spec: String) -> Option<String> {
 
 /// `git init` the given folder so the not-a-repo state's "initialize here"
 /// button can turn an ordinary folder into a tracked workspace in one click.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_init(folder: String) -> Result<(), String> {
+    if let Ok(mut cache) = repo_root_cache().lock() {
+        cache.clear();
+    }
+    if let Ok(mut seen) = baselined_folders().lock() {
+        seen.clear();
+    }
     git_output(&folder, &["init"]).map(|_| ())
 }
 
 /// Capture the session baseline (current HEAD) for a repo, idempotently.
-/// Called at app launch + on tab switch (NOT poll-gated — one rev-parse).
+/// Called at app launch + on tab switch (async + folder-memoized so repeat
+/// tab switches never block the UI thread or spawn `git.exe`).
 /// Scopes the "修改记录" session-commits list to commits made this window.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn git_capture_baseline(folder: String) {
-    let repo_root = match git_output(&folder, &["rev-parse", "--show-toplevel"]) {
-        Ok(s) => s.trim().to_string(),
-        Err(_) => return, // not a repo — nothing to baseline
+    if !git_on_path() {
+        return;
+    }
+    let folder_key = crate::server::normalize_path_key(&folder);
+    if let Ok(seen) = baselined_folders().lock() {
+        if seen.contains(&folder_key) {
+            return;
+        }
+    }
+    let Some(repo_root) = resolve_repo_root(&folder) else {
+        return; // not a repo — do not memoize in `baselined_folders` in case `git init` runs later
     };
     if let Ok(mut map) = baselines().lock() {
         if !map.contains_key(&repo_root) {
@@ -453,6 +521,9 @@ pub fn git_capture_baseline(folder: String) {
             let head = current_head(&repo_root);
             map.insert(repo_root, head);
         }
+    }
+    if let Ok(mut seen) = baselined_folders().lock() {
+        seen.insert(folder_key);
     }
 }
 
