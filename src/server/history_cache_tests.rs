@@ -624,3 +624,244 @@ fn history_review_observes_appended_claude_metadata() {
     assert_matches_cold(&mut cache, &path, "claude", "later session id and timestamp");
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn persisted_session_index_roundtrips_and_resumes_from_committed_offset() {
+    let dir = temp_jsonl("persisted-index").with_extension("");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let codex_path = dir.join("rollout-main.jsonl");
+    let subagent_path = dir.join("rollout-subagent.jsonl");
+    let claude_path = dir.join("claude-compaction.jsonl");
+    let index_path = dir.join("session-index.v1.json");
+
+    write_jsonl(&codex_path, &[CODEX_HEADER, CODEX_USER]);
+    let rejected_header = CODEX_HEADER.replace("\"cli\"", "{\"subagent\":{\"thread_spawn\":{}}}");
+    write_jsonl(&subagent_path, &[&rejected_header, CODEX_USER]);
+    write_jsonl(&claude_path, &[
+        "{\"sessionId\":\"s-persist\",\"cwd\":\"/proj\",\"message\":{\"role\":\"user\",\"content\":\"Below is a conversation log from a Claude Code coding session.\\nCreate a summary.\"}}",
+        "{\"cwd\":\"/proj\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"summary\"}]}}",
+    ]);
+
+    let mut cache = new_cache();
+    assert!(scan_once(&mut cache, &codex_path, "codex").is_some());
+    assert!(scan_once(&mut cache, &subagent_path, "codex").is_none());
+    assert!(scan_once(&mut cache, &claude_path, "claude").is_none());
+    assert_eq!(cache.entries.len(), 1);
+    assert_eq!(cache.rejected.len(), 1);
+    assert_eq!(cache.partial.len(), 1);
+
+    let initial_offset = cache.entries[&codex_path]
+        .checkpoint
+        .as_ref()
+        .unwrap()
+        .committed_offset;
+    assert!(initial_offset > 0);
+
+    // Mutate sentinel before saving to prove warm reload does zero disk re-reads on unchanged files.
+    cache.entries.get_mut(&codex_path).unwrap().session.name = "PERSISTED-SENTINEL".to_string();
+    cache.save_to_path(&index_path);
+    assert!(!cache.dirty);
+
+    let mut reloaded = SessionParseCache::load_from_path(&index_path);
+    let warm_hit = scan_once(&mut reloaded, &codex_path, "codex").unwrap();
+    assert_eq!(warm_hit.name, "PERSISTED-SENTINEL");
+    assert!(scan_once(&mut reloaded, &subagent_path, "codex").is_none());
+
+    // Restore true cached session before appending new turns so incremental state + cold parse agree.
+    reloaded.entries.get_mut(&codex_path).unwrap().session.name = "add retry backoff".to_string();
+    append_lines(&codex_path, &[
+        r#"{"type":"response_item","payload":{"type":"function_call_output","output":"huge tool output line"}}"#,
+        CODEX_ASSISTANT,
+        r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"follow-up question"}]}}"#,
+        CODEX_ASSISTANT,
+    ]);
+    assert_matches_cold(&mut reloaded, &codex_path, "codex", "incremental append after disk reload");
+    let grown_offset = reloaded.entries[&codex_path]
+        .checkpoint
+        .as_ref()
+        .unwrap()
+        .committed_offset;
+    assert!(grown_offset > initial_offset);
+
+    // Appending a real user turn + custom-title to the partial compaction file flips it to active.
+    append_lines(&claude_path, &[
+        r#"{"cwd":"/proj","message":{"role":"user","content":"real user prompt after compaction"}}"#,
+        r#"{"type":"custom-title","customTitle":"Renamed Claude Session"}"#,
+    ]);
+    assert_matches_cold(&mut reloaded, &claude_path, "claude", "partial compaction flipped + renamed");
+    assert_eq!(
+        scan_once(&mut reloaded, &claude_path, "claude").unwrap().name,
+        "Renamed Claude Session"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn pre_truncation_subagent_filtering_preserves_valid_history_quota() {
+    use std::fs::{File, FileTimes};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let dir = temp_jsonl("quota-subagents").with_extension("");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let rejected_header = CODEX_HEADER.replace("\"cli\"", "{\"subagent\":{}}");
+    let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf, &'static str)> = Vec::new();
+
+    // 5 older real user sessions, then 10 newer subagent sessions.
+    for i in 0..5u64 {
+        let p = dir.join(format!("real-{i}.jsonl"));
+        let h = CODEX_HEADER.replace("sess-resume", &format!("real-{i}"));
+        write_jsonl(&p, &[&h, CODEX_USER]);
+        let t = UNIX_EPOCH + Duration::from_secs(1_780_000_000 + i);
+        File::options().write(true).open(&p).unwrap().set_times(FileTimes::new().set_modified(t)).unwrap();
+        candidates.push((t, p, "codex"));
+    }
+    for i in 0..10u64 {
+        let p = dir.join(format!("sub-{i}.jsonl"));
+        write_jsonl(&p, &[&rejected_header, CODEX_USER]);
+        let t = UNIX_EPOCH + Duration::from_secs(1_780_000_100 + i);
+        File::options().write(true).open(&p).unwrap().set_times(FileTimes::new().set_modified(t)).unwrap();
+        candidates.push((t, p, "codex"));
+    }
+
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut cache = new_cache();
+    let maps = std::collections::HashMap::new();
+    let limit = 5usize;
+    let mut collected = Vec::new();
+    for (_, path, tool) in &candidates {
+        if collected.len() >= limit {
+            break;
+        }
+        if let Some(s) = parse_session_cached(&mut cache, path, tool, &maps) {
+            collected.push(s);
+        }
+    }
+    assert_eq!(collected.len(), 5, "all 5 real sessions survive despite 10 newer subagents");
+    assert_eq!(cache.rejected.len(), 10, "all 10 subagents recorded in rejected set");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn heatmap_count_cache_normalizes_slashes_and_appends_incrementally() {
+    let path = temp_jsonl("heatmap-inc");
+    write_jsonl(&path, &[CODEX_HEADER, CODEX_USER]);
+
+    let ts1 = 1_780_000_000i64;
+    let mut count_cache = std::collections::HashMap::new();
+    let mut dirty = false;
+    let mut keep = std::collections::HashSet::new();
+
+    let c1 = resolve_heatmap_jsonl_count(&path, "codex", ts1, &mut count_cache, &mut dirty, &mut keep);
+    assert_eq!(c1, 2);
+    assert!(dirty);
+    let norm_key = normalize_heatmap_path_key(&path);
+    let off1 = count_cache[&norm_key].offset;
+    assert!(off1 > 0);
+
+    // Simulate legacy forward-slash key migration on Windows.
+    #[cfg(windows)]
+    {
+        let slash_key = path.to_string_lossy().replace('\\', "/");
+        let mut legacy_cache = std::collections::HashMap::new();
+        legacy_cache.insert(
+            slash_key,
+            CachedCount {
+                mtime: ts1,
+                offset: off1,
+                committed_count: 99,
+                count: 99,
+            },
+        );
+        let mut mig_dirty = false;
+        let mut mig_keep = std::collections::HashSet::new();
+        // Calling with the backslash path misses `norm_key` only if `slash_key != norm_key`;
+        // calling with a forward-slash PathBuf migrates `raw_key -> norm_key`.
+        let forward_buf = std::path::PathBuf::from(path.to_string_lossy().replace('\\', "/"));
+        let hit = resolve_heatmap_jsonl_count(
+            &forward_buf,
+            "codex",
+            ts1,
+            &mut legacy_cache,
+            &mut mig_dirty,
+            &mut mig_keep,
+        );
+        assert_eq!(hit, 99, "migrated legacy forward-slash key without re-reading disk");
+        assert!(legacy_cache.contains_key(&norm_key));
+    }
+
+    // Append 2 more lines and verify incremental recount from `off1`.
+    append_lines(&path, &[CODEX_ASSISTANT, CODEX_USER]);
+    dirty = false;
+    let c2 = resolve_heatmap_jsonl_count(&path, "codex", ts1 + 5, &mut count_cache, &mut dirty, &mut keep);
+    assert_eq!(c2, 4);
+    assert!(dirty);
+    assert!(count_cache[&norm_key].offset > off1);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+#[ignore = "benchmarks local ~/.codex and ~/.claude history store"]
+fn local_history_index_cold_and_warm_benchmark() {
+    // 1. Cold run (drops any prior disk index in memory to time full index build).
+    if let Ok(mut guard) = session_parse_cache().lock() {
+        *guard = SessionParseCache::default();
+    }
+    let t0 = std::time::Instant::now();
+    let cold_sessions = load_native_history_blocking().expect("cold history");
+    let cold_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+    // 2. Simulate app restart by reloading `SessionParseCache` from disk index.
+    let disk_path = session_index_disk_path().expect("disk path");
+    let disk_bytes = std::fs::metadata(&disk_path).map(|m| m.len()).unwrap_or(0);
+    let t_load = std::time::Instant::now();
+    let reloaded = SessionParseCache::load_from_path(&disk_path);
+    let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
+    let (entries_n, rejected_n, partial_n) = (
+        reloaded.entries.len(),
+        reloaded.rejected.len(),
+        reloaded.partial.len(),
+    );
+    if let Ok(mut guard) = session_parse_cache().lock() {
+        *guard = reloaded;
+    }
+
+    // 3. Warm startup scan (fresh process with persisted index, cold secondary caches -> warm).
+    let t1 = std::time::Instant::now();
+    let warm_restart_sessions = load_native_history_blocking().expect("warm restart history");
+    let warm_restart_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+    // 4. Steady-state refresh scan (in-process poll).
+    let t2 = std::time::Instant::now();
+    let poll_sessions = load_native_history_blocking().expect("poll history");
+    let poll_ms = t2.elapsed().as_secs_f64() * 1000.0;
+
+    // 5. Heatmap scan.
+    let t3 = std::time::Instant::now();
+    let heatmap = load_message_heatmap_blocking().expect("heatmap");
+    let heatmap_ms = t3.elapsed().as_secs_f64() * 1000.0;
+
+    println!(
+        "[bench] sessions={} (restart={}, poll={}) | index={} bytes (entries={}, rejected={}, partial={}, load={:.2}ms) | cold={:.1}ms | warm_restart={:.1}ms | steady_poll={:.1}ms | heatmap={} entries in {:.1}ms",
+        cold_sessions.len(),
+        warm_restart_sessions.len(),
+        poll_sessions.len(),
+        disk_bytes,
+        entries_n,
+        rejected_n,
+        partial_n,
+        load_ms,
+        cold_ms,
+        warm_restart_ms,
+        poll_ms,
+        heatmap.len(),
+        heatmap_ms,
+    );
+    assert_eq!(cold_sessions.len(), warm_restart_sessions.len());
+}

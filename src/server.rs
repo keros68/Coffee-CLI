@@ -2067,6 +2067,28 @@ fn load_claude_project_map(home: &std::path::Path) -> std::collections::HashMap<
     map
 }
 
+fn load_claude_project_map_cached(home: &std::path::Path) -> std::collections::HashMap<String, String> {
+    type Entry = (std::path::PathBuf, SessionFileStamp, std::collections::HashMap<String, String>);
+    static CACHE: OnceLock<Mutex<Option<Entry>>> = OnceLock::new();
+    let claude_json = home.join(".claude.json");
+    let Some(stamp) = file_stamp(&claude_json) else {
+        return std::collections::HashMap::new();
+    };
+    let lock = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = lock.lock() {
+        if let Some((cached_path, cached_stamp, cached_map)) = guard.as_ref() {
+            if cached_path == &claude_json && cached_stamp == &stamp {
+                return cached_map.clone();
+            }
+        }
+    }
+    let fresh = load_claude_project_map(home);
+    if let Ok(mut guard) = lock.lock() {
+        *guard = Some((claude_json, stamp, fresh.clone()));
+    }
+    fresh
+}
+
 // Larger sequential reads reduce syscall overhead for long JSONL transcripts.
 const SESSION_READ_BUF: usize = 128 * 1024;
 
@@ -2075,213 +2097,7 @@ fn parse_agent_jsonl(
     tool_name: &str,
     claude_projects: &std::collections::HashMap<String, String>,
 ) -> Option<SavedSession> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(file_path).ok()?;
-    let reader = std::io::BufReader::with_capacity(SESSION_READ_BUF, file);
-
-    let mut session_id = file_path.file_stem()?.to_string_lossy().to_string();
-    let mut cwd = String::new();
-    let mut updated_at = String::new();
-    let mut created_at = None;
-    let mut title = String::new();
-    // Titles Claude Code writes into the transcript itself: `ai-title` rows
-    // (generated, rewritten as the session evolves) and `custom-title` rows
-    // (`/rename`). The last row of each kind wins.
-    let mut custom_title = String::new();
-    let mut ai_title = String::new();
-    // Headless-run detection, see `is_headless_claude_run`.
-    let mut sdk_entrypoint = false;
-    let mut human_prompt = false;
-    let mut total_messages = 0;
-    // Count of REAL user messages — ones that are not IDE/system injections
-    // (compaction prompt, AGENTS.md, environment_context, etc.). A session
-    // file with zero real user messages is a Claude Code compaction / summary
-    // sub-task (it contains only the "Below is a conversation log..."
-    // injection + the assistant's generated summary), not a conversation the
-    // user had. Surfacing it lists a phantom "Claude Session" card. Drop it.
-    let mut real_user_messages = 0u32;
-
-    for line in reader.lines().map_while(Result::ok) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
-            if created_at.is_none() {
-                created_at = value.get("timestamp").and_then(json_timestamp_string);
-            }
-            if let Some(s) = value.get("sessionId").and_then(|v| v.as_str()) {
-                if !s.is_empty() { session_id = s.to_string(); }
-            }
-            if let Some(c) = value.get("cwd").and_then(|v| v.as_str()) {
-                if cwd.is_empty() && !c.is_empty() { cwd = c.to_string(); }
-            }
-            if let Some(entry) = value.get("entrypoint").and_then(|v| v.as_str()) {
-                sdk_entrypoint = entry.starts_with("sdk");
-            }
-            if value.pointer("/origin/kind").and_then(|v| v.as_str()) == Some("human") {
-                human_prompt = true;
-            }
-            let row_title = |key: &str| -> Option<String> {
-                value.get(key)
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty())
-                    .map(str::to_string)
-            };
-            match value.get("type").and_then(|v| v.as_str()).unwrap_or("") {
-                "custom-title" => {
-                    if let Some(t) = row_title("customTitle") { custom_title = t; }
-                    continue;
-                }
-                "ai-title" => {
-                    if let Some(t) = row_title("aiTitle") { ai_title = t; }
-                    continue;
-                }
-                _ => {}
-            }
-            let mut maybe_msg_obj = value.get("message").and_then(|v| v.as_object());
-            if maybe_msg_obj.is_none() {
-                if let Some(payload) = value.get("payload").and_then(|v| v.as_object()) {
-                    if let Some(ptype) = payload.get("type").and_then(|v| v.as_str()) {
-                        if ptype == "message" {
-                            maybe_msg_obj = Some(payload);
-                        }
-                    }
-                }
-            }
-
-            if let Some(msg_obj) = maybe_msg_obj {
-                if let Some(role) = msg_obj.get("role").and_then(|v| v.as_str()) {
-                    if role == "user" || role == "assistant" {
-                        total_messages += 1;
-                    }
-                    if role == "user" {
-                        // Tally real (non-injected) user messages for the
-                        // compaction-sub-task filter below. Mirrors the
-                        // is_system_injected checks the title extractor uses,
-                        // but runs on EVERY user line (the title branch only
-                        // acts on the first). String content and array
-                        // content (first text block) both covered.
-                        let is_real_user = match msg_obj.get("content") {
-                            Some(c) if c.is_string() => {
-                                c.as_str().map_or(false, |s| !is_system_injected(s))
-                            }
-                            Some(c) if c.is_array() => c.as_array().map_or(false, |arr| {
-                                arr.iter().any(|block| {
-                                    let kind = block.get("type").and_then(|v| v.as_str());
-                                    if kind != Some("text") && kind != Some("input_text") {
-                                        return false;
-                                    }
-                                    block.get("text").and_then(|v| v.as_str())
-                                        .map_or(false, |t| !is_system_injected(t))
-                                })
-                            }),
-                            _ => false,
-                        };
-                        if is_real_user {
-                            real_user_messages += 1;
-                        }
-                    }
-                    if role == "user" && title.is_empty() {
-                        if let Some(content_str) = msg_obj.get("content").and_then(|v| v.as_str()) {
-                            // Skip whole-message IDE/system injections so the
-                            // next real user line becomes the title.
-                            if !is_system_injected(content_str) {
-                                let content_safe = content_str.replace('\n', " ");
-                                let mut chars = content_safe.chars();
-                                let t: String = chars.by_ref().take(40).collect();
-                                title = if chars.next().is_some() { format!("{}...", t) } else { t };
-                            }
-                        } else if let Some(content_arr) = msg_obj.get("content").and_then(|v| v.as_array()) {
-                            // Extract text from object array
-                            for block in content_arr {
-                                if let Some(t) = block.get("type").and_then(|v| v.as_str()) {
-                                    if t == "text" || t == "input_text" {
-                                        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-                                            if is_system_injected(text) {
-                                                continue; // skip IDE / system-injected prompts
-                                            }
-                                            let safe_text = text.replace('\n', " ");
-                                            let mut chars = safe_text.chars();
-                                            let chunk: String = chars.by_ref().take(40).collect();
-                                            title = if chars.next().is_some() { format!("{}...", chunk) } else { chunk };
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // Fallback: JSONL had no embedded cwd (older session, or a line we didn't
-    // recognize). Claude Code's own `~/.claude.json` projects registry is the
-    // only reliable source at that point — see load_claude_project_map for why
-    // guessing from the folder name is actively wrong, not just imprecise. Only
-    // Claude has that registry; any other tool routed through this generic
-    // parser keeps a blank cwd rather than a guess (a wrong-but-existing path
-    // would silently send `--resume` into the wrong project).
-    if cwd.is_empty() && tool_name == "claude" {
-        if let Some(real_path) = file_path
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .and_then(|folder| claude_projects.get(folder))
-        {
-            cwd = real_path.clone();
-        }
-    }
-    // No real user message anywhere in the file → this is a Claude Code
-    // compaction / summary sub-task (or an empty/crashed shell), not a
-    // conversation the user had. Excluding it keeps phantom "Claude Session"
-    // cards out of the history list. Verified on real transcripts: a pure
-    // compaction file holds 1 injected user line + assistant summary lines
-    // and nothing else; any live session has ≥1 real user line.
-    if real_user_messages == 0 {
-        return None;
-    }
-    if is_headless_claude_run(sdk_entrypoint, human_prompt) {
-        return None;
-    }
-    let turn_count = if total_messages > 0 { std::cmp::max(1, (total_messages + 1) / 2) } else { 0 };
-
-    // Fallback date from file metadata
-    if let Ok(meta) = std::fs::metadata(file_path) {
-        if let Ok(mod_time) = meta.modified() {
-            if let Ok(dur) = mod_time.duration_since(std::time::SystemTime::UNIX_EPOCH) {
-                updated_at = dur.as_millis().to_string();
-            }
-        }
-    }
-
-    // Title precedence mirrors the CLI's own: a user rename wins over a
-    // generated title, and both win over the first prompt — so the row reads
-    // the same here as in the CLI's own session picker.
-    if !custom_title.is_empty() {
-        title = custom_title;
-    } else if !ai_title.is_empty() {
-        title = ai_title;
-    }
-    if title.is_empty() {
-        let mut chars = tool_name.chars();
-        let cap_name = match chars.next() {
-            None => String::new(),
-            Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
-        };
-        title = format!("{} Session", cap_name);
-    }
-
-    Some(SavedSession {
-        id: format!("{}_native_{}", tool_name, session_id),
-        name: title,
-        tool: tool_name.to_string(),
-        cwd,
-        session_token: Some(session_id),
-        saved_at: updated_at,
-        created_at: created_at.or_else(|| file_created_epoch_ms(file_path)),
-        file_path: Some(file_path.to_string_lossy().into_owned()),
-        turn_count: Some(turn_count),
-    })
+    parse_jsonl_cold(file_path, tool_name, claude_projects)
 }
 
 /// Whether a Claude Code transcript is a scripted run (`claude -p`, the Agent
@@ -2304,119 +2120,7 @@ fn is_headless_claude_run(sdk_entrypoint: bool, human_prompt: bool) -> bool {
 /// The item itself carries `cwd`, a millisecond `timestamp`, and — for
 /// conversation rows — `type:"message"` + `role` + content blocks.
 fn parse_codebuddy_session_jsonl(file_path: &std::path::Path) -> Option<SavedSession> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(file_path).ok()?;
-    let reader = std::io::BufReader::with_capacity(SESSION_READ_BUF, file);
-
-    // The file name IS the resume token: `codebuddy --resume <token>` resolves
-    // `<project-dir-for-cwd>/<token>.jsonl` (SessionStore.get in the shipped
-    // bundle), so the stem is what we must hand back — not the `sessionId`
-    // embedded in the rows, which can differ for copied/forked transcripts.
-    let session_id = file_path.file_stem()?.to_string_lossy().to_string();
-    let mut cwd = String::new();
-    let mut created_at = None;
-    // Title precedence mirrors the CLI's own getEffectiveSessionTitle(): a
-    // user rename wins over a generated title, and both win over the first
-    // prompt text.
-    let mut custom_title = String::new();
-    let mut ai_title = String::new();
-    let mut topic = String::new();
-    let mut first_prompt = String::new();
-    let mut total_messages = 0u32;
-    let mut real_user_messages = 0u32;
-
-    for line in reader.lines().map_while(Result::ok) {
-        let Ok(root) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
-        // Current transcripts wrap every history item in an envelope
-        // (`{type, uuid, timestamp, payload}`); `session-meta` rows and any
-        // pre-envelope transcript are the bare item itself.
-        let item = root.get("payload").filter(|value| value.is_object()).unwrap_or(&root);
-
-        if created_at.is_none() {
-            created_at = item.get("timestamp").and_then(json_timestamp_string);
-        }
-        if cwd.is_empty() {
-            if let Some(value) = item.get("cwd").and_then(|value| value.as_str()) {
-                if !value.is_empty() {
-                    cwd = value.to_string();
-                }
-            }
-        }
-
-        let item_title = |key: &str| -> Option<String> {
-            item.get(key)
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        };
-        match item.get("type").and_then(|value| value.as_str()).unwrap_or("") {
-            "custom-title" => {
-                if let Some(value) = item_title("customTitle") { custom_title = value; }
-            }
-            "ai-title" => {
-                if let Some(value) = item_title("aiTitle") { ai_title = value; }
-            }
-            "topic" => {
-                if let Some(value) = item_title("topic") { topic = value; }
-            }
-            "message" => {
-                let role = item.get("role").and_then(|value| value.as_str()).unwrap_or("");
-                if role != "user" && role != "assistant" { continue; }
-                total_messages += 1;
-                if role != "user" { continue; }
-                let text = codebuddy_content_text(item.get("content"));
-                if text.is_empty() || is_system_injected(&text) { continue; }
-                if !codebuddy_is_real_user_prompt(item) { continue; }
-                real_user_messages += 1;
-                if first_prompt.is_empty() {
-                    let safe = text.replace('\n', " ");
-                    let mut chars = safe.chars();
-                    let chunk: String = chars.by_ref().take(40).collect();
-                    first_prompt = if chars.next().is_some() { format!("{}...", chunk) } else { chunk };
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // No real user prompt anywhere → a sub-agent / meta-only shell rather than
-    // a conversation the user had. Same filter as the Claude parser, so these
-    // never surface as phantom history cards.
-    if real_user_messages == 0 {
-        return None;
-    }
-    let mut title = if !custom_title.is_empty() { custom_title }
-        else if !ai_title.is_empty() { ai_title }
-        else if !topic.is_empty() { topic }
-        else { first_prompt };
-    if title.is_empty() {
-        title = "CodeBuddy Session".to_string();
-    }
-    let turn_count = if total_messages > 0 { std::cmp::max(1, (total_messages + 1) / 2) } else { 0 };
-
-    // Fallback date from file metadata (matches the other JSONL parsers: file
-    // mtime is the last activity, which is what the history list sorts on).
-    let mut updated_at = String::new();
-    if let Ok(meta) = std::fs::metadata(file_path) {
-        if let Ok(mod_time) = meta.modified() {
-            if let Ok(dur) = mod_time.duration_since(std::time::SystemTime::UNIX_EPOCH) {
-                updated_at = dur.as_millis().to_string();
-            }
-        }
-    }
-
-    Some(SavedSession {
-        id: format!("codebuddy_native_{}", session_id),
-        name: title,
-        tool: "codebuddy".to_string(),
-        cwd,
-        session_token: Some(session_id),
-        saved_at: updated_at,
-        created_at: created_at.or_else(|| file_created_epoch_ms(file_path)),
-        file_path: Some(file_path.to_string_lossy().into_owned()),
-        turn_count: Some(turn_count),
-    })
+    parse_jsonl_cold(file_path, "codebuddy", &std::collections::HashMap::new())
 }
 
 /// Flatten a CodeBuddy history item's `content` (a string, or an array of
@@ -2469,115 +2173,7 @@ fn codebuddy_is_real_user_prompt(item: &serde_json::Value) -> bool {
 /// `{type:"message", message:{role, content:[{type:"text", text}]}}`.
 /// `pi --session <id>` resumes by (partial) UUID — see AGENT_PRESETS.
 fn parse_pi_session_jsonl(file_path: &std::path::Path, tool: &str) -> Option<SavedSession> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(file_path).ok()?;
-    let reader = std::io::BufReader::with_capacity(SESSION_READ_BUF, file);
-
-    // File stem is `<ISO-ts>_<uuid>` — fall back to the trailing UUID if the
-    // header row is missing/unparseable. `pi --session` accepts partial IDs,
-    // so even a stem-derived token resumes.
-    let stem = file_path.file_stem()?.to_string_lossy().to_string();
-    let stem_uuid = stem.rsplit_once('_').map(|(_, u)| u.to_string()).unwrap_or(stem.clone());
-    let mut session_id = stem_uuid;
-    let mut cwd = String::new();
-    let mut title = String::new();
-    let mut total_messages = 0;
-    let mut created_at = None;
-    let mut native_title = String::new();
-
-    for line in reader.lines().map_while(Result::ok) {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
-        let row_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-        if tool == "omp" && matches!(row_type, "title" | "title_change" | "session") {
-            if let Some(text) = value.get("title").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
-                // A fixed-width title slot precedes the header in newer OMP files.
-                if row_type != "session" || native_title.is_empty() {
-                    native_title = text.to_string();
-                }
-            }
-        }
-
-        // `/name <text>` appends `{type:"session_info", name}`. Same reading as
-        // Pi's own session list: the last row wins, and a blank name clears it.
-        if row_type == "session_info" {
-            native_title = value
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .unwrap_or("")
-                .to_string();
-            continue;
-        }
-
-        // Header: pull id (resume token) + cwd straight off line 1.
-        if row_type == "session" {
-            created_at = value
-                .get("timestamp")
-                .and_then(json_timestamp_string)
-                .or(created_at);
-            if let Some(id) = value.get("id").and_then(|v| v.as_str()) {
-                if !id.is_empty() { session_id = id.to_string(); }
-            }
-            if let Some(c) = value.get("cwd").and_then(|v| v.as_str()) {
-                if !c.is_empty() { cwd = c.to_string(); }
-            }
-            continue;
-        }
-
-        // Message rows: nested under `message.{role, content}`.
-        if row_type == "message" {
-            let Some(msg) = value.get("message").and_then(|v| v.as_object()) else { continue };
-            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
-            if role == "user" || role == "assistant" {
-                total_messages += 1;
-            }
-            if !title.is_empty() || role != "user" { continue; }
-            let Some(content) = msg.get("content") else { continue };
-            let blocks = content.as_array().cloned().unwrap_or_else(|| vec![serde_json::json!({"type":"text", "text":content})]);
-            for block in &blocks {
-                let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                if block_type != "text" && block_type != "input_text" { continue; }
-                let Some(text) = block.get("text").and_then(|v| v.as_str()) else { continue };
-                if is_system_injected(text) { continue; }
-                let safe = text.replace('\n', " ");
-                let mut chars = safe.chars();
-                let chunk: String = chars.by_ref().take(40).collect();
-                title = if chars.next().is_some() { format!("{}...", chunk) } else { chunk };
-                break;
-            }
-        }
-    }
-
-    // Fallback date from file mtime (matches parse_agent_jsonl — file mtime
-    // reflects last append = last activity, more accurate than the header's
-    // creation timestamp for "recent sessions" sorting).
-    let mut updated_at = String::new();
-    if let Ok(meta) = std::fs::metadata(file_path) {
-        if let Ok(mod_time) = meta.modified() {
-            if let Ok(dur) = mod_time.duration_since(std::time::SystemTime::UNIX_EPOCH) {
-                updated_at = dur.as_millis().to_string();
-            }
-        }
-    }
-    if !native_title.is_empty() { title = native_title; }
-    if tool == "omp" && total_messages == 0 { return None; }
-    if title.is_empty() {
-        title = if tool == "omp" { "Oh-My-Pi Session" } else { "Pi Session" }.to_string();
-    }
-    let turn_count = if total_messages > 0 { std::cmp::max(1, (total_messages + 1) / 2) } else { 0 };
-
-    Some(SavedSession {
-        id: format!("{}_native_{}", tool, session_id),
-        name: title,
-        tool: tool.to_string(),
-        cwd,
-        session_token: Some(session_id),
-        saved_at: updated_at,
-        created_at: created_at.or_else(|| file_created_epoch_ms(file_path)),
-        file_path: Some(file_path.to_string_lossy().into_owned()),
-        turn_count: Some(turn_count),
-    })
+    parse_jsonl_cold(file_path, tool, &std::collections::HashMap::new())
 }
 
 /// Strip Codex Desktop's synthetic "Files mentioned by the user"
@@ -2634,125 +2230,7 @@ fn strip_codex_desktop_file_preamble(text: &str) -> &str {
 ///   - subsequent rows: `{type: "response_item", payload: {type: "message", role, content: [{type: "input_text", text}]}}`
 ///     (also `user_message`, `event_msg`, `turn_context`, etc. — we ignore the non-message ones)
 fn parse_codex_session_jsonl(file_path: &std::path::Path) -> Option<SavedSession> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(file_path).ok()?;
-    let reader = std::io::BufReader::with_capacity(SESSION_READ_BUF, file);
-
-    let mut session_id = file_path.file_stem()?.to_string_lossy().to_string();
-    let mut cwd = String::new();
-    let mut updated_at = String::new();
-    let mut title = String::new();
-    let mut total_messages = 0;
-    let mut created_at = None;
-
-    for line in reader.lines().map_while(Result::ok) {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        let row_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let payload = match value.get("payload") {
-            Some(p) => p,
-            None => continue,
-        };
-
-        // Session meta: pull id + cwd off the first row.
-        if row_type == "session_meta" {
-            created_at = payload
-                .get("timestamp")
-                .or_else(|| value.get("timestamp"))
-                .and_then(json_timestamp_string)
-                .or(created_at);
-            // Codex (incl. Codex Desktop) writes a separate rollout JSONL for
-            // every sub-agent it spawns, alongside the user's main session.
-            // Sub-agent rollouts inherit the parent's first user message, so
-            // without filtering they surface as duplicate top-level cards that
-            // multiply as the main session runs. See `is_codex_subagent_session`
-            // for the marker rationale. `forked_from_id` is deliberately NOT a
-            // marker: it identifies user-initiated fork/resume sessions, which
-            // are legitimate top-level user sessions and must stay visible.
-            if is_codex_subagent_session(payload) || is_codex_exec_session(payload) {
-                return None;
-            }
-            if let Some(id) = payload.get("id").and_then(|v| v.as_str()) {
-                if !id.is_empty() {
-                    session_id = id.to_string();
-                }
-            }
-            if let Some(c) = payload.get("cwd").and_then(|v| v.as_str()) {
-                if !c.is_empty() {
-                    cwd = c.to_string();
-                }
-            }
-            continue;
-        }
-
-        // Message rows: response_item with payload.type=message, or
-        // the dedicated user_message row type. Both wrap content as
-        // an array of `{type: "input_text", text}` blocks.
-        let payload_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        let is_msg = (row_type == "response_item" && payload_type == "message")
-            || row_type == "user_message";
-        if !is_msg {
-            continue;
-        }
-        let role = payload.get("role").and_then(|v| v.as_str()).unwrap_or("");
-        if role == "user" || role == "assistant" {
-            total_messages += 1;
-        }
-        if !title.is_empty() || role != "user" {
-            continue;
-        }
-        let Some(content_arr) = payload.get("content").and_then(|v| v.as_array()) else {
-            continue;
-        };
-        for block in content_arr {
-            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            if block_type != "input_text" && block_type != "text" {
-                continue;
-            }
-            let Some(raw) = block.get("text").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            // Codex Desktop packs attached files + the real question
-            // into one `input_text` block prefixed with
-            // "# Files mentioned by the user"; strip that preamble so
-            // the title is the user's actual request, not the file
-            // list. Returns "" for files-only blocks (no text).
-            let text = strip_codex_desktop_file_preamble(raw);
-            if text.is_empty() || is_system_injected(text) {
-                continue; // skip AGENTS.md / environment_context wrappers
-            }
-            let safe = text.replace('\n', " ");
-            let mut chars = safe.chars();
-            let chunk: String = chars.by_ref().take(40).collect();
-            title = if chars.next().is_some() { format!("{}...", chunk) } else { chunk };
-            break;
-        }
-    }
-
-    if let Ok(meta) = std::fs::metadata(file_path) {
-        if let Ok(mod_time) = meta.modified() {
-            if let Ok(dur) = mod_time.duration_since(std::time::SystemTime::UNIX_EPOCH) {
-                updated_at = dur.as_millis().to_string();
-            }
-        }
-    }
-    if title.is_empty() {
-        title = "Codex Session".to_string();
-    }
-    let turn_count = if total_messages > 0 { std::cmp::max(1, (total_messages + 1) / 2) } else { 0 };
-
-    Some(SavedSession {
-        id: format!("codex_native_{}", session_id),
-        name: title,
-        tool: "codex".to_string(),
-        cwd,
-        session_token: Some(session_id),
-        saved_at: updated_at,
-        created_at: created_at.or_else(|| file_created_epoch_ms(file_path)),
-        file_path: Some(file_path.to_string_lossy().into_owned()),
-        turn_count: Some(turn_count),
-    })
+    parse_jsonl_cold(file_path, "codex", &std::collections::HashMap::new())
 }
 
 /// Thread names Codex keeps for its own session picker, keyed by thread id.
@@ -2855,42 +2333,23 @@ fn is_codex_exec_session(payload: &serde_json::Value) -> bool {
 /// (retired Gemini CLI and early agy builds) stays covered by the JSONL
 /// file walk in `collect_registry_history_candidates`.
 fn find_antigravity_cli_sessions(home: &std::path::Path, result: &mut Vec<SavedSession>) {
-    let root = home.join(".gemini").join("antigravity-cli");
-
-    // The metadata index is best-effort: missing file / invalid JSON just
-    // degrades to transcript-derived titles and empty cwds.
-    let index = std::fs::read_to_string(root.join("cache").join("conversation_metadata.json"))
-        .ok()
-        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
-    let conversations = index
-        .as_ref()
-        .and_then(|v| v.get("conversations"))
-        .and_then(|v| v.as_object());
-
-    // last_conversations.json maps workspace → most recent conv-uuid.
-    // Inverted here so index-missing sessions can still resolve a cwd.
-    let mut last_convs: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    if let Ok(text) = std::fs::read_to_string(root.join("cache").join("last_conversations.json")) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(map) = value.as_object() {
-                for (workspace, conv) in map {
-                    if let Some(uuid) = conv.as_str() {
-                        let cwd = file_uri_to_local_path(workspace)
-                            .unwrap_or_else(|| workspace.clone());
-                        last_convs.insert(uuid.to_string(), cwd);
-                    }
-                }
-            }
-        }
+    #[derive(PartialEq, Eq)]
+    struct AgyCacheKey {
+        root: std::path::PathBuf,
+        meta_stamp: Option<SessionFileStamp>,
+        last_stamp: Option<SessionFileStamp>,
+        hist_stamp: Option<SessionFileStamp>,
+        candidates: Vec<(String, SessionFileStamp)>,
     }
+    static AGY_CACHE: OnceLock<Mutex<Option<(AgyCacheKey, Vec<SavedSession>)>>> = OnceLock::new();
 
-    let typed = std::fs::read_to_string(root.join("history.jsonl"))
-        .ok()
-        .map(|text| AgyTypedHistory::parse(&text));
+    let root = home.join(".gemini").join("antigravity-cli");
+    let meta_path = root.join("cache").join("conversation_metadata.json");
+    let last_path = root.join("cache").join("last_conversations.json");
+    let hist_path = root.join("history.jsonl");
 
-    // (transcript mtime, conv-uuid, transcript path) — newest first.
-    let mut candidates: Vec<(std::time::SystemTime, String, std::path::PathBuf)> = Vec::new();
+    // (transcript stamp, conv-uuid, transcript path) — newest first.
+    let mut candidates: Vec<(SessionFileStamp, String, std::path::PathBuf)> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(root.join("brain")) {
         for entry in entries.flatten() {
             let dir = entry.path();
@@ -2908,18 +2367,72 @@ fn find_antigravity_cli_sessions(home: &std::path::Path, result: &mut Vec<SavedS
             else {
                 continue;
             };
-            let mtime = std::fs::metadata(&transcript)
-                .and_then(|meta| meta.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            candidates.push((mtime, uuid.to_string(), transcript));
+            let Some(stamp) = file_stamp(&transcript) else {
+                continue;
+            };
+            candidates.push((stamp, uuid.to_string(), transcript));
         }
     }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by(|a, b| b.0.modified.cmp(&a.0.modified));
     const ANTIGRAVITY_HISTORY_LIMIT: usize = 200;
     candidates.truncate(ANTIGRAVITY_HISTORY_LIMIT);
 
+    let cache_key = AgyCacheKey {
+        root: root.clone(),
+        meta_stamp: file_stamp(&meta_path),
+        last_stamp: file_stamp(&last_path),
+        hist_stamp: file_stamp(&hist_path),
+        candidates: candidates
+            .iter()
+            .map(|(s, id, _)| (id.clone(), s.clone()))
+            .collect(),
+    };
+
+    let cache_lock = AGY_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache_lock.lock() {
+        if let Some((prev_key, cached_sessions)) = guard.as_ref() {
+            if prev_key == &cache_key {
+                result.extend(cached_sessions.iter().cloned());
+                return;
+            }
+        }
+    }
+
+    // The metadata index is best-effort: missing file / invalid JSON just
+    // degrades to transcript-derived titles and empty cwds.
+    let index = std::fs::read_to_string(&meta_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    let conversations = index
+        .as_ref()
+        .and_then(|v| v.get("conversations"))
+        .and_then(|v| v.as_object());
+
+    // last_conversations.json maps workspace → most recent conv-uuid.
+    // Inverted here so index-missing sessions can still resolve a cwd.
+    let mut last_convs: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    if let Ok(text) = std::fs::read_to_string(&last_path) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+            if let Some(map) = value.as_object() {
+                for (workspace, conv) in map {
+                    if let Some(uuid) = conv.as_str() {
+                        let cwd = file_uri_to_local_path(workspace)
+                            .unwrap_or_else(|| workspace.clone());
+                        last_convs.insert(uuid.to_string(), cwd);
+                    }
+                }
+            }
+        }
+    }
+
+    let typed = std::fs::read_to_string(&hist_path)
+        .ok()
+        .map(|text| AgyTypedHistory::parse(&text));
+
     let mut sessions: Vec<SavedSession> = Vec::with_capacity(candidates.len());
-    for (mtime, id, transcript) in &candidates {
+    for (stamp, id, transcript) in &candidates {
+        let mtime = &stamp.modified;
         let index_entry = conversations.and_then(|map| map.get(id));
         let summary = index_entry.and_then(|v| v.get("summary"));
         // IDE-internal conversations (`is_internal` / `Internal`) never
@@ -3009,7 +2522,7 @@ fn find_antigravity_cli_sessions(home: &std::path::Path, result: &mut Vec<SavedS
             cwd,
             session_token: Some(id.clone()),
             saved_at,
-            created_at: file_created_epoch_ms(transcript),
+            created_at: stamp.created.map(system_time_epoch_ms).filter(|s| !s.is_empty()),
             file_path: Some(transcript.to_string_lossy().into_owned()),
             // turn_count deferred — NumSteps in the index counts internal
             // planner steps, not messages; counting USER_INPUT rows would be
@@ -3019,6 +2532,9 @@ fn find_antigravity_cli_sessions(home: &std::path::Path, result: &mut Vec<SavedS
         });
     }
     sessions.sort_by(|a, b| saved_session_epoch_ms(&b.saved_at).cmp(&saved_session_epoch_ms(&a.saved_at)));
+    if let Ok(mut guard) = cache_lock.lock() {
+        *guard = Some((cache_key, sessions.clone()));
+    }
     result.extend(sessions);
 }
 
@@ -3040,9 +2556,15 @@ fn system_time_epoch_ms(time: std::time::SystemTime) -> String {
 /// The user's first request in an agy transcript: the `<USER_REQUEST>` block
 /// of the first USER_INPUT row. None when no usable row exists.
 fn agy_first_request(path: &std::path::Path) -> Option<String> {
-    use std::io::BufRead;
+    use std::io::{BufRead, Read};
     let file = std::fs::File::open(path).ok()?;
-    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+    for line in std::io::BufReader::new(file.take(2 * 1024 * 1024))
+        .lines()
+        .map_while(Result::ok)
+    {
+        if !line.contains("USER_INPUT") && !line.contains("\\u") {
+            continue;
+        }
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
@@ -3126,87 +2648,7 @@ fn xml_block<'a>(content: &'a str, tag: &str) -> Option<&'a str> {
 ///   • text lives in `message.parts[].text`, not the top-level `content[]`
 ///   • assistant rows use `type: 'assistant'`, not `'gemini'`
 fn parse_qwen_session_jsonl(file_path: &std::path::Path) -> Option<SavedSession> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(file_path).ok()?;
-    let reader = std::io::BufReader::with_capacity(SESSION_READ_BUF, file);
-
-    let mut session_id = file_path.file_stem()?.to_string_lossy().to_string();
-    let mut cwd = String::new();
-    let mut updated_at = String::new();
-    let mut title = String::new();
-    let mut total_messages = 0;
-    let mut created_at = None;
-
-    for line in reader.lines().map_while(Result::ok) {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        if let Some(s) = value.get("sessionId").and_then(|v| v.as_str()) {
-            if !s.is_empty() {
-                session_id = s.to_string();
-            }
-        }
-        if created_at.is_none() {
-            created_at = value.get("timestamp").and_then(json_timestamp_string);
-        }
-        if cwd.is_empty() {
-            if let Some(c) = value.get("cwd").and_then(|v| v.as_str()) {
-                cwd = c.to_string();
-            }
-        }
-        let row_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if row_type == "user" || row_type == "assistant" {
-            total_messages += 1;
-        }
-        // Title: first user message, first 40 chars.
-        if !title.is_empty() || row_type != "user" {
-            continue;
-        }
-        let Some(parts) = value
-            .get("message")
-            .and_then(|m| m.get("parts"))
-            .and_then(|v| v.as_array())
-        else {
-            continue;
-        };
-        for block in parts {
-            let Some(text) = block.get("text").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            if is_system_injected(text) {
-                continue;
-            }
-            let safe = text.replace('\n', " ");
-            let mut chars = safe.chars();
-            let chunk: String = chars.by_ref().take(40).collect();
-            title = if chars.next().is_some() { format!("{}...", chunk) } else { chunk };
-            break;
-        }
-    }
-
-    if let Ok(meta) = std::fs::metadata(file_path) {
-        if let Ok(mod_time) = meta.modified() {
-            if let Ok(dur) = mod_time.duration_since(std::time::SystemTime::UNIX_EPOCH) {
-                updated_at = dur.as_millis().to_string();
-            }
-        }
-    }
-    if title.is_empty() {
-        title = "Qwen Session".to_string();
-    }
-    let turn_count = if total_messages > 0 { std::cmp::max(1, (total_messages + 1) / 2) } else { 0 };
-
-    Some(SavedSession {
-        id: format!("qwen_native_{}", session_id),
-        name: title,
-        tool: "qwen".to_string(),
-        cwd,
-        session_token: Some(session_id),
-        saved_at: updated_at,
-        created_at: created_at.or_else(|| file_created_epoch_ms(file_path)),
-        file_path: Some(file_path.to_string_lossy().into_owned()),
-        turn_count: Some(turn_count),
-    })
+    parse_jsonl_cold(file_path, "qwen", &std::collections::HashMap::new())
 }
 
 fn validated_native_session_path(file_path: &str) -> Result<std::path::PathBuf, String> {
@@ -4400,11 +3842,21 @@ fn redact_kimi_prompt(text: &str) -> String {
 /// nested under each main session's dir and never get their own index entry,
 /// so the index yields main sessions only — no parent_id filtering needed.
 fn find_kimi_sessions(home: &std::path::Path, result: &mut Vec<SavedSession>) {
+    type KimiCached = (
+        SessionFileStamp,
+        Option<SessionFileStamp>,
+        String,
+        SavedSession,
+    );
+    static KIMI_CACHE: OnceLock<Mutex<std::collections::HashMap<std::path::PathBuf, KimiCached>>> =
+        OnceLock::new();
+
     let Some(root) = kimi_root(home) else { return };
     let Ok(index) = std::fs::read_to_string(root.join("session_index.jsonl")) else { return };
 
-    // (state.json mtime, sessionDir, sessionId, workDir)
-    let mut candidates: Vec<(std::time::SystemTime, std::path::PathBuf, String, String)> = Vec::new();
+    // (state.json stamp, sessionDir, sessionId, workDir)
+    let mut candidates: Vec<(Option<SessionFileStamp>, std::path::PathBuf, String, String)> =
+        Vec::new();
     for line in index.lines() {
         let line = line.trim();
         if line.is_empty() { continue; }
@@ -4413,16 +3865,34 @@ fn find_kimi_sessions(home: &std::path::Path, result: &mut Vec<SavedSession>) {
         let Some(session_dir) = v.get("sessionDir").and_then(|x| x.as_str()) else { continue };
         let work_dir = v.get("workDir").and_then(|x| x.as_str()).unwrap_or("").to_string();
         let state_path = std::path::Path::new(session_dir).join("state.json");
-        let mtime = std::fs::metadata(&state_path)
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        candidates.push((mtime, std::path::PathBuf::from(session_dir), session_id.to_string(), work_dir));
+        let stamp = file_stamp(&state_path);
+        candidates.push((stamp, std::path::PathBuf::from(session_dir), session_id.to_string(), work_dir));
     }
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by(|a, b| {
+        let ma = a.0.as_ref().map(|s| s.modified).unwrap_or(std::time::UNIX_EPOCH);
+        let mb = b.0.as_ref().map(|s| s.modified).unwrap_or(std::time::UNIX_EPOCH);
+        mb.cmp(&ma)
+    });
     const KIMI_HISTORY_LIMIT: usize = 200;
     candidates.truncate(KIMI_HISTORY_LIMIT);
 
-    for (mtime, session_dir, session_id, work_dir) in &candidates {
+    let cache_lock = KIMI_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut cache_guard = cache_lock.lock().ok();
+    let mut keep_dirs = std::collections::HashSet::with_capacity(candidates.len());
+
+    for (state_stamp, session_dir, session_id, work_dir) in &candidates {
+        let Some(stamp) = state_stamp.as_ref() else { continue };
+        keep_dirs.insert(session_dir.clone());
+        let sidecar_stamp = file_stamp(&session_dir.join("coffee-title.txt"));
+        if let Some(cache) = cache_guard.as_ref() {
+            if let Some((cs, ss, wd, cached_session)) = cache.get(session_dir) {
+                if cs == stamp && ss == &sidecar_stamp && wd == work_dir {
+                    result.push(cached_session.clone());
+                    continue;
+                }
+            }
+        }
+
         let Ok(state_bytes) = std::fs::read_to_string(session_dir.join("state.json")) else { continue };
         let Ok(state) = serde_json::from_str::<serde_json::Value>(&state_bytes) else { continue };
 
@@ -4434,9 +3904,6 @@ fn find_kimi_sessions(home: &std::path::Path, result: &mut Vec<SavedSession>) {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
             })
-            // Kimi titles a session only after it has generated one; until
-            // then fall back to what the user typed, the same way every other
-            // tool's parser names an untitled session.
             .or_else(|| kimi_first_user_prompt_cached(session_id, session_dir))
             .map(|s| {
                 let safe = s.replace('\n', " ");
@@ -4446,19 +3913,18 @@ fn find_kimi_sessions(home: &std::path::Path, result: &mut Vec<SavedSession>) {
             })
             .unwrap_or_else(|| "Kimi Code Session".to_string());
 
-        // Keep every SavedSession timestamp in the same epoch-ms format. The
-        // metadata file is rewritten whenever state changes and its mtime was
-        // already collected for pre-selection, so no second stat is needed.
-        let saved_at = mtime
+        let saved_at = stamp
+            .modified
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .map(|d| d.as_millis().to_string())
             .unwrap_or_default();
-        let created_at = state.get("createdAt")
+        let created_at = state
+            .get("createdAt")
             .and_then(|value| value.as_str())
             .map(|value| value.to_string())
-            .or_else(|| file_created_epoch_ms(&session_dir.join("state.json")));
+            .or_else(|| stamp.created.map(system_time_epoch_ms).filter(|s| !s.is_empty()));
 
-        result.push(SavedSession {
+        let session = SavedSession {
             id: format!("kimicode_native_{}", session_id),
             name: title,
             tool: "kimicode".to_string(),
@@ -4466,13 +3932,19 @@ fn find_kimi_sessions(home: &std::path::Path, result: &mut Vec<SavedSession>) {
             session_token: Some(session_id.clone()),
             saved_at,
             created_at,
-            // sessionDir exposes the session's on-disk location (holds
-            // state.json + wire.jsonl). Mirrors OpenCode's file_path surface.
             file_path: Some(session_dir.to_string_lossy().into_owned()),
-            // turn_count deferred — counting wire.jsonl is extra I/O per
-            // session and the History board renders fine without it.
             turn_count: None,
-        });
+        };
+        if let Some(cache) = cache_guard.as_mut() {
+            cache.insert(
+                session_dir.clone(),
+                (stamp.clone(), sidecar_stamp, work_dir.clone(), session.clone()),
+            );
+        }
+        result.push(session);
+    }
+    if let Some(cache) = cache_guard.as_mut() {
+        cache.retain(|k, _| keep_dirs.contains(k));
     }
 }
 
@@ -4509,23 +3981,14 @@ fn collect_kimi_heatmap_entries(
             .unwrap_or(0);
         if ts < cutoff_secs { continue; }
 
-        let path_key = wire_path.to_string_lossy().into_owned();
-        keep_paths.insert(path_key.clone());
-        let count = if let Some(entry) = count_cache.get(&path_key) {
-            if entry.mtime == ts {
-                entry.count
-            } else {
-                let c = count_jsonl_message_lines(&wire_path);
-                count_cache.insert(path_key.clone(), CachedCount { mtime: ts, count: c });
-                *cache_dirty = true;
-                c
-            }
-        } else {
-            let c = count_jsonl_message_lines(&wire_path);
-            count_cache.insert(path_key.clone(), CachedCount { mtime: ts, count: c });
-            *cache_dirty = true;
-            c
-        };
+        let count = resolve_heatmap_jsonl_count(
+            &wire_path,
+            "kimicode",
+            ts,
+            count_cache,
+            cache_dirty,
+            keep_paths,
+        );
         if count > 0 {
             out.push(HeatmapEntry { ts, count });
         }
@@ -4678,23 +4141,14 @@ fn collect_grok_heatmap_entries(
                 .unwrap_or(0);
             if ts < cutoff_secs { continue; }
 
-            let path_key = chat_path.to_string_lossy().into_owned();
-            keep_paths.insert(path_key.clone());
-            let count = if let Some(entry) = count_cache.get(&path_key) {
-                if entry.mtime == ts {
-                    entry.count
-                } else {
-                    let c = count_jsonl_message_lines(&chat_path);
-                    count_cache.insert(path_key.clone(), CachedCount { mtime: ts, count: c });
-                    *cache_dirty = true;
-                    c
-                }
-            } else {
-                let c = count_jsonl_message_lines(&chat_path);
-                count_cache.insert(path_key.clone(), CachedCount { mtime: ts, count: c });
-                *cache_dirty = true;
-                c
-            };
+            let count = resolve_heatmap_jsonl_count(
+                &chat_path,
+                "grok",
+                ts,
+                count_cache,
+                cache_dirty,
+                keep_paths,
+            );
             if count > 0 {
                 out.push(HeatmapEntry { ts, count });
             }
@@ -4744,23 +4198,14 @@ fn collect_antigravity_cli_heatmap_entries(
             continue;
         }
 
-        let path_key = transcript.to_string_lossy().into_owned();
-        keep_paths.insert(path_key.clone());
-        let count = if let Some(entry) = count_cache.get(&path_key) {
-            if entry.mtime == ts {
-                entry.count
-            } else {
-                let c = count_jsonl_message_lines(&transcript);
-                count_cache.insert(path_key.clone(), CachedCount { mtime: ts, count: c });
-                *cache_dirty = true;
-                c
-            }
-        } else {
-            let c = count_jsonl_message_lines(&transcript);
-            count_cache.insert(path_key.clone(), CachedCount { mtime: ts, count: c });
-            *cache_dirty = true;
-            c
-        };
+        let count = resolve_heatmap_jsonl_count(
+            &transcript,
+            "antigravity",
+            ts,
+            count_cache,
+            cache_dirty,
+            keep_paths,
+        );
         if count > 0 {
             out.push(HeatmapEntry { ts, count });
         }
@@ -5403,60 +4848,9 @@ fn saved_session_epoch_ms(value: &str) -> u64 {
     }
 }
 
-// Cache unchanged files only. A larger file may be a rewrite or replacement,
-// and appended rows can change metadata as well as counts. Changed files always
-// use the same full parser as a cold scan.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SessionFileStamp {
-    modified: std::time::SystemTime,
-    created: Option<std::time::SystemTime>,
-    size: u64,
-    #[cfg(unix)]
-    identity: (u64, u64),
-}
-
-fn file_stamp(path: &std::path::Path) -> Option<SessionFileStamp> {
-    let metadata = std::fs::metadata(path).ok()?;
-    #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt;
-    Some(SessionFileStamp {
-        modified: metadata.modified().ok()?,
-        created: metadata.created().ok(),
-        size: metadata.len(),
-        #[cfg(unix)]
-        identity: (metadata.dev(), metadata.ino()),
-    })
-}
-
-struct CachedSession {
-    stamp: SessionFileStamp,
-    session: SavedSession,
-}
-
-#[derive(Default)]
-struct SessionParseCache {
-    // Compare the map actually used by the parser, avoiding timestamp
-    // collisions and a race between reading it and statting it afterwards.
-    claude_projects: std::collections::HashMap<String, String>,
-    entries: std::collections::HashMap<std::path::PathBuf, CachedSession>,
-}
-
-fn session_parse_cache() -> &'static std::sync::Mutex<SessionParseCache> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<SessionParseCache>> = std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(SessionParseCache::default()))
-}
-
-fn sync_aux_generation(
-    cache: &mut SessionParseCache,
-    claude_projects: &std::collections::HashMap<String, String>,
-) -> bool {
-    if cache.claude_projects == *claude_projects {
-        return false;
-    }
-    cache.entries.clear();
-    cache.claude_projects = claude_projects.clone();
-    true
-}
+#[path = "server/session_index.rs"]
+mod session_index;
+use session_index::*;
 
 /// Dispatch one candidate file to its tool-specific parser. Split out of
 /// `load_native_history_blocking` so the cache wrapper around it stays
@@ -5467,51 +4861,25 @@ fn parse_session_file(
     claude_project_map: &std::collections::HashMap<String, String>,
 ) -> Option<SavedSession> {
     match tool {
-        "hermes"      => parse_hermes_json(path),
-        "codex"       => parse_codex_session_jsonl(path),
-        "codebuddy"   => parse_codebuddy_session_jsonl(path),
-        "pi" | "omp"  => parse_pi_session_jsonl(path, tool),
-        "qwen"        => parse_qwen_session_jsonl(path),
-        other         => parse_agent_jsonl(path, other, claude_project_map),
+        "hermes" => parse_hermes_json(path),
+        "codex" => parse_codex_session_jsonl(path),
+        "codebuddy" => parse_codebuddy_session_jsonl(path),
+        "pi" | "omp" => parse_pi_session_jsonl(path, tool),
+        "qwen" => parse_qwen_session_jsonl(path),
+        other => parse_agent_jsonl(path, other, claude_project_map),
     }
-}
-
-/// Cache a stable successful parse. None also means an unreadable file in the
-/// existing parsers, so do not persist it: a temporary sharing/permission error
-/// must be retried even if the file's metadata does not change.
-fn parse_session_cached(
-    cache: &mut SessionParseCache,
-    path: &std::path::Path,
-    tool: &str,
-    claude_project_map: &std::collections::HashMap<String, String>,
-) -> Option<SavedSession> {
-    let before = file_stamp(path);
-    if let Some(hit) = cache.entries.get(path) {
-        if before.as_ref() == Some(&hit.stamp) {
-            return Some(hit.session.clone());
-        }
-    }
-    cache.entries.remove(path);
-    let session = parse_session_file(path, tool, claude_project_map)?;
-    if let Some(stamp) = before {
-        // A writer may append/replace the transcript during parsing. Never
-        // associate that result with an earlier snapshot of the file.
-        if file_stamp(path).as_ref() == Some(&stamp) {
-            cache.entries.insert(path.to_path_buf(), CachedSession { stamp, session: session.clone() });
-        }
-    }
-    Some(session)
 }
 
 fn load_native_history_blocking() -> Result<Vec<SavedSession>, String> {
-    // Cap history to the N most recent entries. Keeps UI responsive when users
-    // have hundreds of sessions — parsing a full jsonl/json file is expensive,
-    // so we pre-select candidates by file mtime and only parse the top N.
-    // 200 covers months of daily use; the frontend renders 30 at a time and
-    // pages in the rest progressively as the user scrolls (HistoryBoard).
+    // Cap history to the N most recent valid entries. Candidates are sorted by
+    // file mtime desc first, then scanned until HISTORY_LIMIT real user
+    // sessions are collected — so subagent / exec / compaction transcripts never
+    // starve valid sessions out of the 200-item window.
     const HISTORY_LIMIT: usize = 200;
+    const MAX_CANDIDATE_SCAN: usize = 2_000;
 
-    let mut file_candidates: Vec<(std::time::SystemTime, std::path::PathBuf, &'static str)> = Vec::new();
+    let mut file_candidates: Vec<(std::time::SystemTime, std::path::PathBuf, &'static str)> =
+        Vec::new();
     let mut result: Vec<SavedSession> = Vec::new();
 
     let home = dirs::home_dir();
@@ -5519,47 +4887,50 @@ fn load_native_history_blocking() -> Result<Vec<SavedSession>, String> {
         collect_registry_history_candidates(home, &mut file_candidates);
     }
 
-    // Sort candidates by mtime desc and parse only the newest HISTORY_LIMIT.
     file_candidates.sort_by(|a, b| b.0.cmp(&a.0));
-    file_candidates.truncate(HISTORY_LIMIT);
 
-    // Same treatment for Claude's encoded-folder → real-cwd registry: read and
-    // encode `~/.claude.json` ONCE (not per empty-cwd session), and only if
-    // there are Claude candidates that might need the fallback at all.
-    let claude_project_map = match (&home, file_candidates.iter().any(|(_, _, t)| *t == "claude")) {
-        (Some(h), true) => load_claude_project_map(h),
+    let has_claude = file_candidates
+        .iter()
+        .take(MAX_CANDIDATE_SCAN)
+        .any(|(_, _, t)| *t == "claude");
+    let claude_project_map = match (&home, has_claude) {
+        (Some(h), true) => load_claude_project_map_cached(h),
         _ => std::collections::HashMap::new(),
     };
 
-    // Shared across scans; retain at most the newest HISTORY_LIMIT paths.
+    // Shared across scans and persisted to `~/.coffee-cli/cache/session-index.v1.json`.
     let mut guard = session_parse_cache().lock().ok();
-    // Poisoned mutex → run against a throwaway cache. Every lookup misses, so
-    // this is exactly the pre-cache behaviour: slower, never wrong.
     let mut fallback = SessionParseCache::default();
     let cache: &mut SessionParseCache = match guard.as_mut() {
         Some(c) => c,
         None => &mut fallback,
     };
-    sync_aux_generation(cache, &claude_project_map);
+    if has_claude {
+        sync_aux_generation(cache, &claude_project_map);
+    }
 
     let mut keep_paths: std::collections::HashSet<std::path::PathBuf> =
-        std::collections::HashSet::with_capacity(file_candidates.len());
-    for (_, path, tool) in &file_candidates {
+        std::collections::HashSet::with_capacity(HISTORY_LIMIT * 2);
+    for (_, path, tool) in file_candidates.iter().take(MAX_CANDIDATE_SCAN) {
+        if result.len() >= HISTORY_LIMIT {
+            break;
+        }
         keep_paths.insert(path.clone());
-        let parsed = parse_session_cached(
-            cache,
-            path,
-            tool,
-            &claude_project_map,
-        );
+        let parsed = parse_session_cached(cache, path, tool, &claude_project_map);
         if let Some(session) = parsed {
             result.push(session);
         }
     }
 
-    // Drop entries for files that fell out of the newest-200 window so the cache
-    // can't grow without bound across a long-running session.
-    cache.entries.retain(|k, _| keep_paths.contains(k));
+    // Retain only files inside the active newest-sessions scan window, and
+    // atomically flush the persistent disk index whenever entries changed.
+    cache.retain_paths(&keep_paths);
+    if cache.dirty {
+        if let Some(disk_path) = session_index_disk_path() {
+            cache.save_to_path(&disk_path);
+        }
+    }
+    drop(guard);
 
     if let Some(home) = home.as_ref() {
         if let Some(tool) = crate::tools::find("codex") {
@@ -5736,6 +5107,10 @@ struct HeatmapEntry {
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct CachedCount {
     mtime: i64,
+    #[serde(default)]
+    offset: u64,
+    #[serde(default)]
+    committed_count: u32,
     count: u32,
 }
 
@@ -5752,12 +5127,115 @@ fn read_count_cache() -> std::collections::HashMap<String, CachedCount> {
 
 fn write_count_cache(map: &std::collections::HashMap<String, CachedCount>) {
     let Some(path) = count_cache_path() else { return; };
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Ok(json) = serde_json::to_vec(map) {
+        let _ = crate::json_file::write_atomic(&path, &json);
     }
-    if let Ok(json) = serde_json::to_string(map) {
-        let _ = std::fs::write(&path, json);
+}
+
+fn resolve_heatmap_jsonl_count(
+    path: &std::path::Path,
+    tool: &str,
+    ts: i64,
+    count_cache: &mut std::collections::HashMap<String, CachedCount>,
+    cache_dirty: &mut bool,
+    keep_paths: &mut std::collections::HashSet<String>,
+) -> u32 {
+    let path_key = normalize_heatmap_path_key(path);
+    keep_paths.insert(path_key.clone());
+
+    if let Some(entry) = count_cache.get(&path_key) {
+        if entry.mtime == ts {
+            return entry.count;
+        }
+    } else {
+        // Seamless one-time migration for legacy un-normalized keys (e.g. mixed `/` vs `\`).
+        let raw_key = path.to_string_lossy();
+        if raw_key.as_ref() != path_key {
+            if let Some(legacy) = count_cache.get(raw_key.as_ref()).cloned() {
+                if legacy.mtime == ts {
+                    let c = legacy.count;
+                    count_cache.insert(path_key, legacy);
+                    *cache_dirty = true;
+                    return c;
+                }
+            }
+        }
     }
+
+    const MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+    // Fast path: reuse an already-parsed checkpoint from `session_parse_cache`
+    // when the file is within the 32 MiB heatmap cap and matches current mtime.
+    if tool != "hermes" {
+        if let Ok(guard) = session_parse_cache().lock() {
+            let cp_opt = guard
+                .entries
+                .get(path)
+                .and_then(|e| {
+                    let mtime_secs = e
+                        .stamp
+                        .modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(-1);
+                    (mtime_secs == ts && e.stamp.size <= MAX_BYTES)
+                        .then(|| e.checkpoint.as_ref())
+                        .flatten()
+                })
+                .or_else(|| {
+                    guard.partial.get(path).and_then(|p| {
+                        let mtime_secs = p
+                            .stamp
+                            .modified
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(-1);
+                        (mtime_secs == ts && p.stamp.size <= MAX_BYTES).then_some(&p.checkpoint)
+                    })
+                });
+            if let Some(cp) = cp_opt {
+                let c = cp.heatmap_count();
+                count_cache.insert(
+                    path_key,
+                    CachedCount {
+                        mtime: ts,
+                        offset: cp.committed_offset,
+                        committed_count: c,
+                        count: c,
+                    },
+                );
+                *cache_dirty = true;
+                return c;
+            }
+        }
+    }
+
+    let prev = count_cache.get(&path_key).cloned();
+    let (offset, committed_count, count) = if tool == "hermes" {
+        let c = count_hermes_messages(path);
+        (0, c, c)
+    } else if tool == "omp" {
+        let c = count_omp_messages(path);
+        (0, c, c)
+    } else {
+        let (prev_off, prev_cnt) = prev
+            .filter(|p| p.offset > 0 && p.committed_count > 0)
+            .map(|p| (p.offset, p.committed_count))
+            .unwrap_or((0, 0));
+        count_jsonl_message_lines_incremental(path, prev_off, prev_cnt)
+    };
+
+    count_cache.insert(
+        path_key,
+        CachedCount {
+            mtime: ts,
+            offset,
+            committed_count,
+            count,
+        },
+    );
+    *cache_dirty = true;
+    count
 }
 
 #[tauri::command]
@@ -5803,38 +5281,14 @@ fn load_message_heatmap_blocking() -> Result<Vec<HeatmapEntry>, String> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            let path_key = path.to_string_lossy().into_owned();
-            keep_paths.insert(path_key.clone());
-
-            // Cache hit only when mtime exactly matches — any append to the
-            // jsonl bumps mtime and forces a recount.
-            let count = if let Some(entry) = count_cache.get(&path_key) {
-                if entry.mtime == ts {
-                    entry.count
-                } else {
-                    let c = if *tool == "omp" {
-                        count_omp_messages(path)
-                    } else if *tool == "hermes" {
-                        count_hermes_messages(path)
-                    } else {
-                        count_jsonl_message_lines(path)
-                    };
-                    count_cache.insert(path_key.clone(), CachedCount { mtime: ts, count: c });
-                    cache_dirty = true;
-                    c
-                }
-            } else {
-                let c = if *tool == "omp" {
-                    count_omp_messages(path)
-                } else if *tool == "hermes" {
-                    count_hermes_messages(path)
-                } else {
-                    count_jsonl_message_lines(path)
-                };
-                count_cache.insert(path_key.clone(), CachedCount { mtime: ts, count: c });
-                cache_dirty = true;
-                c
-            };
+            let count = resolve_heatmap_jsonl_count(
+                path,
+                tool,
+                ts,
+                &mut count_cache,
+                &mut cache_dirty,
+                &mut keep_paths,
+            );
             if count > 0 {
                 out.push(HeatmapEntry { ts, count });
             }
@@ -5999,41 +5453,88 @@ fn collect_opencode_heatmap_entries(
     }
 }
 
-// Cheap line-count for JSONL session files. We treat every non-empty
-// line as one "turn" — including system / tool-result rows. The heatmap
-// is an activity proxy, not a strict user-message tally, so over-
-// counting tool spam is fine (more chatter = darker square).
-fn count_jsonl_message_lines(path: &std::path::Path) -> u32 {
-    use std::io::{BufRead, BufReader, Read};
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return 0,
-    };
-    // Cap reading at ~32 MiB to keep one runaway session from stalling
-    // the whole heatmap scan. 32 MiB of JSONL is ~50k+ lines — already
-    // off the chart visually, so capping doesn't affect the bucket.
+// Cheap incremental line-count for JSONL session files. Treats every non-empty
+// line as one "turn" up to ~32 MiB, resuming from `prev_offset` when a file
+// grew by appending rather than re-reading 32 MiB from byte 0.
+fn count_jsonl_message_lines_incremental(
+    path: &std::path::Path,
+    prev_offset: u64,
+    prev_committed_count: u32,
+) -> (u64, u32, u32) {
+    use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
     const MAX_BYTES: u64 = 32 * 1024 * 1024;
-    let mut br = BufReader::new(file.take(MAX_BYTES));
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return (0, 0, 0),
+    };
+    let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let (start_offset, mut committed_count) =
+        if prev_offset > 0 && file_len >= prev_offset && prev_offset < MAX_BYTES {
+            if file.seek(SeekFrom::Start(prev_offset)).is_ok() {
+                (prev_offset, prev_committed_count)
+            } else {
+                let _ = file.seek(SeekFrom::Start(0));
+                (0, 0)
+            }
+        } else if prev_offset >= MAX_BYTES && file_len >= prev_offset {
+            return (prev_offset, prev_committed_count, prev_committed_count);
+        } else {
+            (0, 0)
+        };
+
+    let budget = MAX_BYTES.saturating_sub(start_offset);
+    let mut br = BufReader::with_capacity(SESSION_READ_BUF, file.take(budget));
     let mut buf: Vec<u8> = Vec::with_capacity(512);
-    let mut count = 0u32;
+    let mut committed_offset = start_offset;
+    let mut display_count = committed_count;
     while let Ok(n) = br.read_until(b'\n', &mut buf) {
-        if n == 0 { break; }
-        if buf.iter().any(|&b| !b.is_ascii_whitespace()) {
-            count = count.saturating_add(1);
+        if n == 0 {
+            break;
+        }
+        let non_ws = buf.iter().any(|&b| !b.is_ascii_whitespace());
+        if non_ws {
+            display_count = display_count.saturating_add(1);
+        }
+        if buf.last() == Some(&b'\n') {
+            committed_offset += n as u64;
+            if non_ws {
+                committed_count = committed_count.saturating_add(1);
+            }
         }
         buf.clear();
     }
-    count
+    (committed_offset, committed_count, display_count)
 }
 
 fn count_omp_messages(path: &std::path::Path) -> u32 {
     use std::io::{BufRead, Read};
+    #[derive(serde::Deserialize)]
+    struct MsgRole {
+        #[serde(default)]
+        role: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Row {
+        #[serde(rename = "type", default)]
+        row_type: Option<String>,
+        #[serde(default)]
+        message: Option<MsgRole>,
+    }
     let Ok(file) = std::fs::File::open(path) else { return 0 };
-    std::io::BufReader::new(file.take(32 * 1024 * 1024)).lines().map_while(Result::ok)
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(&line).ok())
-        .filter(|row| row.get("type").and_then(|v| v.as_str()) == Some("message") &&
-            matches!(row.pointer("/message/role").and_then(|v| v.as_str()), Some("user" | "assistant" | "toolResult")))
-        .count().min(u32::MAX as usize) as u32
+    std::io::BufReader::with_capacity(SESSION_READ_BUF, file.take(32 * 1024 * 1024))
+        .lines()
+        .map_while(Result::ok)
+        .filter(|line| line.contains("message") || line.contains("\\u"))
+        .filter_map(|line| serde_json::from_str::<Row>(&line).ok())
+        .filter(|row| {
+            row.row_type.as_deref() == Some("message")
+                && matches!(
+                    row.message.as_ref().and_then(|m| m.role.as_deref()),
+                    Some("user" | "assistant" | "toolResult")
+                )
+        })
+        .count()
+        .min(u32::MAX as usize) as u32
 }
 
 // Hermes stores one big JSON file per session, not JSONL — so line-
