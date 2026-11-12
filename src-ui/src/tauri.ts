@@ -207,9 +207,15 @@ export const commands = {
   }>('detect_shells'),
 
   /** Static list of tools registered in the Rust src/tools/ registry —
-   *  one entry per supported AI CLI with the canonical display name.
-   *  Loaded once at app boot and cached; see `lib/tool-info.ts`. */
-  listTools: () => invoke<{ id: string; displayName: string }[]>('list_tools'),
+   *  one entry per supported AI CLI with the canonical display name and
+   *  optional CLI resume argv shape. Loaded once at app boot and cached;
+   *  see `lib/tool-info.ts`. */
+  listTools: () => invoke<{
+    id: string;
+    displayName: string;
+    resumeProgram: string | null;
+    resumeArgsBefore: string[];
+  }[]>('list_tools'),
 
   /** Re-run legacy cleanup and non-hook presentation migration for one tool. */
   maintainToolIntegration: (tool: string) =>

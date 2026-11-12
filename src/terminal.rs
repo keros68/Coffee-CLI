@@ -471,6 +471,14 @@ pub fn find_preset(tool_name: &str) -> Option<&'static AgentPreset> {
     AGENT_PRESETS.iter().find(|p| p.tool_name == tool_name)
 }
 
+/// True when `tool_name` belongs to a registered AI CLI in `crate::tools::TOOLS`
+/// (rather than plain `terminal`, `remote`, or `None`). Single source of truth
+/// for subprocess environment hints so newly registered CLIs never silently miss
+/// `FORCE_COLOR`, `NODE_OPTIONS`, `GIT_TERMINAL_PROMPT`, or UTF-8 I/O defaults.
+pub fn is_registered_ai_cli(tool_name: Option<&str>) -> bool {
+    tool_name.and_then(crate::tools::find).is_some()
+}
+
 // ─── Shared Session State ─────────────────────────────────
 
 pub struct TerminalSession {
@@ -610,17 +618,7 @@ pub fn spawn(
     // waiting for credential input, Unicode corruption, Homebrew tools not
     // in PATH, etc. Every env var is a no-op for tools that don't recognize
     // it — maximum benefit, zero risk for those that do.
-    let is_ai_cli = matches!(
-        tool_name.as_deref(),
-        Some("claude")
-            | Some("qwen")
-            | Some("opencode")
-            | Some("mimocode")
-            | Some("hermes")
-            | Some("codex")
-            | Some("grok")
-            | Some("antigravity")
-    );
+    let is_ai_cli = is_registered_ai_cli(tool_name.as_deref());
 
     if is_ai_cli {
         // Claude Code only: seed `theme: "auto"` in ~/.claude/settings.json
@@ -1415,6 +1413,41 @@ mod tests {
         assert_eq!(p.resume_program, Some("claude"));
         assert_eq!(p.resume_args_before, &["--resume"]);
         assert!(p.resume_args_after.is_empty());
+    }
+
+    #[test]
+    fn all_presets_belong_to_registered_tools_and_surface_in_list_tools() {
+        for preset in AGENT_PRESETS {
+            assert!(
+                crate::tools::find(preset.tool_name).is_some(),
+                "AGENT_PRESETS contains unregistered tool '{}'",
+                preset.tool_name
+            );
+            assert!(
+                preset.resume_args_after.is_empty(),
+                "preset '{}' sets resume_args_after; update frontend resume-command builder if needed",
+                preset.tool_name
+            );
+        }
+
+        let listed = crate::tools::list_tools();
+        assert_eq!(listed.len(), crate::tools::TOOLS.len());
+        for info in &listed {
+            assert!(
+                is_registered_ai_cli(Some(info.id)),
+                "registered tool '{}' must receive AI CLI env hints",
+                info.id
+            );
+            let expected_prog = find_preset(info.id).and_then(|p| p.resume_program);
+            assert_eq!(info.resume_program, expected_prog, "resume_program mismatch for {}", info.id);
+        }
+        let kilo = listed.iter().find(|t| t.id == "kilo").expect("kilo in list_tools");
+        assert_eq!(kilo.resume_program, Some("kilo"));
+        assert_eq!(kilo.resume_args_before, &["--session"]);
+
+        assert!(!is_registered_ai_cli(None));
+        assert!(!is_registered_ai_cli(Some("terminal")));
+        assert!(!is_registered_ai_cli(Some("remote")));
     }
 
     #[test]

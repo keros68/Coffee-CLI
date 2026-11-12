@@ -363,3 +363,43 @@ console.log('OK: actual tool-card folder selection launches the chosen tool');
   assert.deepEqual(actions.map(action => action.type), ['ADD_TERMINAL', 'SET_ACTIVE_TERMINAL']);
   console.log('OK: mixed timestamps sort newest first and history clicks resume a real CLI tab');
 }
+
+// Every catalog AI CLI must have a shared icon in lib/tool-icons.tsx, and
+// resume-command must cover Kilo Code as well as registry-provided shapes.
+{
+  const iconsTree = source('lib/tool-icons.tsx');
+  const caseLiterals = new Set();
+  function collectCases(node) {
+    if (ts.isCaseClause(node) && ts.isStringLiteral(node.expression)) {
+      caseLiterals.add(node.expression.text);
+    }
+    ts.forEachChild(node, collectCases);
+  }
+  collectCases(iconsTree);
+  for (const key of aiPins) {
+    assert.ok(caseLiterals.has(key), `lib/tool-icons.tsx missing icon case for '${key}'`);
+  }
+
+  const resumeRaw = fs.readFileSync(new URL('../src/lib/resume-command.ts', import.meta.url), 'utf8')
+    .replace(/^import\s+.*$/gm, '')
+    .replace(/^export\s+/gm, '');
+  let liveResume = undefined;
+  const buildResumeCommand = evaluate(`${resumeRaw}\nbuildResumeCommand`, {
+    getToolResumeShape: () => liveResume,
+  });
+  assert.equal(
+    buildResumeCommand('kilo', 'ses_12345678901234567890'),
+    'kilo --session ses_12345678901234567890',
+    'fallback table must include kilo',
+  );
+  assert.equal(buildResumeCommand('openclaw', 'abc'), null);
+  liveResume = { program: 'custom-cli', argsBefore: ['--continue'] };
+  assert.equal(
+    buildResumeCommand('kilo', 'ses_12345678901234567890'),
+    'custom-cli --continue ses_12345678901234567890',
+    'list_tools IPC shape overrides static fallback',
+  );
+  liveResume = null;
+  assert.equal(buildResumeCommand('kilo', 'ses_12345678901234567890'), null);
+  console.log('OK: shared tool-icons cover all 23 AI CLIs and resume-command honors registry shapes');
+}

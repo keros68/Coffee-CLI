@@ -865,3 +865,53 @@ fn local_history_index_cold_and_warm_benchmark() {
     );
     assert_eq!(cold_sessions.len(), warm_restart_sessions.len());
 }
+
+#[test]
+fn validated_native_session_path_accepts_antigravity_and_rejects_outside_dirs() {
+    let home = temp_jsonl("session-allowlist-home").with_extension("");
+    let agy_logs = home
+        .join(".gemini")
+        .join("antigravity-cli")
+        .join("brain")
+        .join("conv-1234")
+        .join(".system_generated")
+        .join("logs");
+    let claude_dir = home.join(".claude").join("projects").join("demo");
+    let secret_dir = home.join("Documents");
+    std::fs::create_dir_all(&agy_logs).unwrap();
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::create_dir_all(&secret_dir).unwrap();
+
+    let agy_transcript = agy_logs.join("transcript_full.jsonl");
+    let claude_transcript = claude_dir.join("session.jsonl");
+    let outside_json = secret_dir.join("notes.jsonl");
+    let non_jsonl = agy_logs.join("notes.txt");
+    std::fs::write(&agy_transcript, "{}\n").unwrap();
+    std::fs::write(&claude_transcript, "{}\n").unwrap();
+    std::fs::write(&outside_json, "{}\n").unwrap();
+    std::fs::write(&non_jsonl, "hello").unwrap();
+
+    assert!(
+        validated_native_session_path_under(&agy_transcript.to_string_lossy(), &home).is_ok(),
+        "Antigravity brain transcripts must pass native session path validation"
+    );
+    assert!(
+        validated_native_session_path_under(&claude_transcript.to_string_lossy(), &home).is_ok(),
+        "Registry-backed Claude transcripts must pass native session path validation"
+    );
+    let outside_err =
+        validated_native_session_path_under(&outside_json.to_string_lossy(), &home).unwrap_err();
+    assert!(outside_err.contains("Access denied"), "unexpected error: {outside_err}");
+
+    let traversal = agy_logs.join("..").join("..").join("..").join("..").join("..").join("Documents").join("notes.jsonl");
+    assert!(
+        validated_native_session_path_under(&traversal.to_string_lossy(), &home).is_err(),
+        "parent-directory traversal escaping agent dirs must be rejected"
+    );
+    assert!(
+        validated_native_session_path_under(&non_jsonl.to_string_lossy(), &home).is_err(),
+        "non-json/jsonl extensions must be rejected"
+    );
+
+    std::fs::remove_dir_all(home).unwrap();
+}

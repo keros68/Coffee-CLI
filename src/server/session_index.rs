@@ -1645,6 +1645,7 @@ fn scan_jsonl_from(
     })
 }
 
+#[cfg(test)]
 pub(super) fn parse_jsonl_cold(
     path: &std::path::Path,
     tool: &str,

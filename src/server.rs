@@ -2092,6 +2092,7 @@ fn load_claude_project_map_cached(home: &std::path::Path) -> std::collections::H
 // Larger sequential reads reduce syscall overhead for long JSONL transcripts.
 const SESSION_READ_BUF: usize = 128 * 1024;
 
+#[cfg(test)]
 fn parse_agent_jsonl(
     file_path: &std::path::Path,
     tool_name: &str,
@@ -2119,6 +2120,7 @@ fn is_headless_claude_run(sdk_entrypoint: bool, human_prompt: bool) -> bool {
 /// rows (and anything written before envelopes landed) are the bare item.
 /// The item itself carries `cwd`, a millisecond `timestamp`, and — for
 /// conversation rows — `type:"message"` + `role` + content blocks.
+#[cfg(test)]
 fn parse_codebuddy_session_jsonl(file_path: &std::path::Path) -> Option<SavedSession> {
     parse_jsonl_cold(file_path, "codebuddy", &std::collections::HashMap::new())
 }
@@ -2172,6 +2174,7 @@ fn codebuddy_is_real_user_prompt(item: &serde_json::Value) -> bool {
 /// here so no bucket-name decoding), and message rows are
 /// `{type:"message", message:{role, content:[{type:"text", text}]}}`.
 /// `pi --session <id>` resumes by (partial) UUID — see AGENT_PRESETS.
+#[cfg(test)]
 fn parse_pi_session_jsonl(file_path: &std::path::Path, tool: &str) -> Option<SavedSession> {
     parse_jsonl_cold(file_path, tool, &std::collections::HashMap::new())
 }
@@ -2229,6 +2232,7 @@ fn strip_codex_desktop_file_preamble(text: &str) -> &str {
 ///     the same row schema and are parsed here uniformly)
 ///   - subsequent rows: `{type: "response_item", payload: {type: "message", role, content: [{type: "input_text", text}]}}`
 ///     (also `user_message`, `event_msg`, `turn_context`, etc. — we ignore the non-message ones)
+#[cfg(test)]
 fn parse_codex_session_jsonl(file_path: &std::path::Path) -> Option<SavedSession> {
     parse_jsonl_cold(file_path, "codex", &std::collections::HashMap::new())
 }
@@ -2647,74 +2651,50 @@ fn xml_block<'a>(content: &'a str, tag: &str) -> Option<&'a str> {
 ///   • cwd is on every row (no separate projects.json reverse map needed)
 ///   • text lives in `message.parts[].text`, not the top-level `content[]`
 ///   • assistant rows use `type: 'assistant'`, not `'gemini'`
+#[cfg(test)]
 fn parse_qwen_session_jsonl(file_path: &std::path::Path) -> Option<SavedSession> {
     parse_jsonl_cold(file_path, "qwen", &std::collections::HashMap::new())
 }
 
-fn validated_native_session_path(file_path: &str) -> Result<std::path::PathBuf, String> {
-    let path = std::path::Path::new(&file_path);
-
-    // Only allow .jsonl / .json files
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if ext != "jsonl" && ext != "json" {
-        return Err("Only .jsonl and .json files are allowed".to_string());
-    }
-
-    // Canonicalize to resolve any `..` or symlink traversal
-    let canonical_raw = path.canonicalize().map_err(|e| format!("Invalid path: {e}"))?;
-    // On Windows, canonicalize() prepends \\?\ (UNC extended-length prefix).
-    // Strip it so that starts_with() comparisons against plain home-dir paths work.
+fn strip_windows_verbatim(path: std::path::PathBuf) -> std::path::PathBuf {
     #[cfg(windows)]
-    let canonical = {
-        let s = canonical_raw.to_string_lossy();
-        if s.starts_with(r"\\?\") {
-            std::path::PathBuf::from(s[4..].to_string())
-        } else {
-            canonical_raw
+    {
+        let s = path.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return std::path::PathBuf::from(rest);
         }
-    };
-    #[cfg(not(windows))]
-    let canonical = canonical_raw;
+    }
+    path
+}
 
-    // Must reside under a known agent data directory.
-    //
-    // Built-in defaults cover the standard install locations; any
-    // additional paths the user configured via tool_config.history_path
-    // are also allowed (otherwise the WSL-redirected scanner would find
-    // sessions but reading them back would 403). Path canonicalization
-    // already resolved symlinks, so this is a pure prefix check.
-    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+fn allowed_native_session_roots(home: &std::path::Path) -> Vec<std::path::PathBuf> {
     // Hermes Agent's data root is platform-dependent (`%LOCALAPPDATA%\hermes`
-    // on Windows, `~/.hermes` elsewhere, or `$HERMES_HOME` if set). See
-    // tools/hermes.rs::hermes_home. We also push the legacy `~/.hermes` when
-    // it's distinct from the resolved root so a user who exports HERMES_HOME
-    // mid-life can still read previously-collected sessions still sitting at
-    // the dotdir path.
+    // on Windows, `~/.hermes` elsewhere, or `$HERMES_HOME` if set). Keep the
+    // legacy `~/.hermes` dotdir alongside it so sessions collected before
+    // exporting `HERMES_HOME` remain readable.
     let hermes_root = crate::tools::hermes::hermes_home();
     let hermes_legacy = home.join(".hermes");
     let mut allowed: Vec<std::path::PathBuf> = vec![
         home.join(".claude"),
         hermes_root.clone(),
-        home.join(".codex").join("sessions"),
-        home.join(".qwen").join("projects"),
-        home.join(".local").join("share").join("opencode"),
-        home.join(".openclaw").join("agents"),
+        // Antigravity CLI stores brain transcripts outside `history_shape`
+        // (`~/.gemini/antigravity-cli/brain/<uuid>/.system_generated/logs/`)
+        // and legacy Gemini CLI transcripts under `~/.gemini/tmp`.
+        home.join(".gemini").join("antigravity-cli"),
+        home.join(".gemini").join("tmp"),
+        // Secondary MiMo Code fallback root (see `mimocode_db`).
+        home.join(".config").join("mimocode"),
     ];
     if hermes_legacy != hermes_root {
         allowed.push(hermes_legacy);
     }
-    for tool in ["claude", "hermes", "codex", "qwen", "opencode", "openclaw"] {
-        let cfg = crate::tool_config::get(tool).history_path;
-        if !cfg.is_empty() {
-            allowed.push(crate::tool_config::expand_path(&cfg));
-        }
-    }
-    // Registry-backed tools added after the original allowlist (Pi, Kimi,
-    // Grok, MiMo, Kilo, etc.) use the exact same resolved history root as the
-    // scanner. This also covers per-tool history-path overrides.
     for tool in crate::tools::TOOLS {
         if let Some(shape) = tool.history_shape.as_ref() {
-            allowed.push(history_root(tool, shape, &home));
+            allowed.push(history_root(tool, shape, home));
+        }
+        let cfg = crate::tool_config::get(tool.id).history_path;
+        if !cfg.is_empty() {
+            allowed.push(crate::tool_config::expand_path(&cfg));
         }
     }
     if let Ok(kimi_home) = std::env::var("KIMI_CODE_HOME") {
@@ -2727,10 +2707,45 @@ fn validated_native_session_path(file_path: &str) -> Result<std::path::PathBuf, 
             allowed.push(std::path::PathBuf::from(grok_home).join("sessions"));
         }
     }
-    if !allowed.iter().any(|prefix| canonical.starts_with(prefix)) {
+    allowed
+}
+
+fn validated_native_session_path_under(
+    file_path: &str,
+    home: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let path = std::path::Path::new(&file_path);
+
+    // Only allow .jsonl / .json files
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if ext != "jsonl" && ext != "json" {
+        return Err("Only .jsonl and .json files are allowed".to_string());
+    }
+
+    // Canonicalize to resolve any `..` or symlink traversal
+    let canonical = strip_windows_verbatim(
+        path.canonicalize()
+            .map_err(|e| format!("Invalid path: {e}"))?,
+    );
+
+    let allowed = allowed_native_session_roots(home);
+    let is_allowed = allowed.iter().any(|prefix| {
+        canonical.starts_with(prefix)
+            || prefix
+                .canonicalize()
+                .ok()
+                .map(strip_windows_verbatim)
+                .is_some_and(|cp| canonical.starts_with(&cp))
+    });
+    if !is_allowed {
         return Err("Access denied: path is outside allowed agent data directories".to_string());
     }
     Ok(canonical)
+}
+
+fn validated_native_session_path(file_path: &str) -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+    validated_native_session_path_under(file_path, &home)
 }
 
 // ─── OpenCode Session Reader ─────────────────────────────────────────────────
@@ -4855,6 +4870,7 @@ use session_index::*;
 /// Dispatch one candidate file to its tool-specific parser. Split out of
 /// `load_native_history_blocking` so the cache wrapper around it stays
 /// readable; the match arms are unchanged.
+#[cfg(test)]
 fn parse_session_file(
     path: &std::path::Path,
     tool: &str,

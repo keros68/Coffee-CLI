@@ -105,12 +105,11 @@ function emit() {
  *  both shapes resolve here. 0 = unparseable. Exported because the auto-name
  *  pass needs the same "how long has this session been quiet" math. */
 export function savedAtMs(savedAt: string): number {
-  let ms = Date.parse(savedAt);
-  if (isNaN(ms)) {
-    const n = Number(savedAt);
-    if (!isNaN(n)) ms = n < 1e11 ? n * 1000 : n;
-  }
-  return isNaN(ms) ? 0 : ms;
+  const parsed = Date.parse(savedAt);
+  if (!isNaN(parsed)) return parsed;
+  const n = Number(savedAt);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n < 1e11 ? n * 1000 : n;
 }
 
 export function sortByMtime(list: SavedSession[]): SavedSession[] {

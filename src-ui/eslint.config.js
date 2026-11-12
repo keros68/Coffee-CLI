@@ -28,6 +28,7 @@ export default defineConfig([
     files: [
       'src/store/app-state.tsx',
       'src/lib/git-status.tsx',
+      'src/lib/tool-icons.tsx',
       'src/components/center/TierTerminal.tsx',
       'src/components/center/CenterPanel.tsx',
     ],

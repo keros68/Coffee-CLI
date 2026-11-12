@@ -267,22 +267,34 @@ pub fn find(id: &str) -> Option<&'static ToolDescriptor> {
 }
 
 /// Frontend-facing summary of a registered tool. Returned by the
-/// `list_tools` IPC so the UI can pull display names off the registry
-/// instead of hardcoding label tables in every component.
-#[derive(serde::Serialize)]
+/// `list_tools` IPC so the UI can pull display names and CLI resume shapes
+/// off the registry instead of hardcoding tables in components/helpers.
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolInfo {
     pub id: &'static str,
     pub display_name: &'static str,
+    pub resume_program: Option<&'static str>,
+    pub resume_args_before: &'static [&'static str],
 }
 
 #[tauri::command(async)]
 pub fn list_tools() -> Vec<ToolInfo> {
     TOOLS
         .iter()
-        .map(|t| ToolInfo {
-            id: t.id,
-            display_name: t.display_name,
+        .map(|t| {
+            let preset = crate::terminal::find_preset(t.id);
+            let resume_program = preset.and_then(|p| p.resume_program);
+            let resume_args_before = preset
+                .filter(|p| p.resume_program.is_some())
+                .map(|p| p.resume_args_before)
+                .unwrap_or(&[]);
+            ToolInfo {
+                id: t.id,
+                display_name: t.display_name,
+                resume_program,
+                resume_args_before,
+            }
         })
         .collect()
 }

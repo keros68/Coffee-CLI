@@ -7,7 +7,7 @@ import type { ChatNavigationRow, ChatSessionRead, SavedSession } from '../../tau
 import { commands, isTauri } from '../../tauri';
 import { bindAutoHideScrollbar } from '../../lib/auto-hide-scrollbar';
 import { clipboardRead, clipboardReadImage, clipboardWrite } from '../../lib/clipboard';
-import { getHistorySnapshot } from '../../lib/history-cache';
+import { getHistorySnapshot, savedAtMs } from '../../lib/history-cache';
 import { subscribeTerminalEvents } from '../../lib/pty-event-bus';
 import { useTerminalInteraction } from '../../lib/terminal-interaction';
 import {
@@ -168,14 +168,6 @@ function normalizedPath(path: string): string {
   if (/^(?:[a-z]:(?:\/|$)|\/\/)/i.test(normalized)) normalized = normalized.toLowerCase();
   const worktreeMarker = normalized.indexOf('/.claude/worktrees/');
   return worktreeMarker >= 0 ? normalized.slice(0, worktreeMarker) : normalized;
-}
-
-function savedAtMs(value: string): number {
-  const parsed = Date.parse(value);
-  if (!Number.isNaN(parsed)) return parsed;
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric) || numeric <= 0) return 0;
-  return numeric < 1e11 ? numeric * 1000 : numeric;
 }
 
 function sourceIdentityDistance(

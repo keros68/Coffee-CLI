@@ -22,9 +22,21 @@ import { commands } from '../tauri';
 interface ToolInfo {
   id: string;
   displayName: string;
+  resumeProgram?: string | null;
+  resumeArgsBefore?: string[];
 }
 
-let cache: Map<string, string> | null = null;
+export interface ToolResumeShape {
+  program: string;
+  argsBefore: string[];
+}
+
+interface CachedToolEntry {
+  displayName: string;
+  resume: ToolResumeShape | null;
+}
+
+let cache: Map<string, CachedToolEntry> | null = null;
 let pending: Promise<void> | null = null;
 
 export async function loadToolInfo(): Promise<void> {
@@ -33,10 +45,20 @@ export async function loadToolInfo(): Promise<void> {
   pending = (async () => {
     try {
       const tools: ToolInfo[] = await commands.listTools();
-      cache = new Map(tools.map((t) => [t.id, t.displayName]));
+      cache = new Map(
+        tools.map((t) => [
+          t.id,
+          {
+            displayName: t.displayName,
+            resume: t.resumeProgram
+              ? { program: t.resumeProgram, argsBefore: t.resumeArgsBefore ?? [] }
+              : null,
+          },
+        ]),
+      );
     } catch (e) {
       // IPC failure shouldn't block app boot — components will just
-      // see id-as-label until a later retry. Log and move on.
+      // see fallback labels/shapes until a later retry. Log and move on.
       console.warn('[tool-info] list_tools IPC failed:', e);
       cache = new Map();
     }
@@ -45,5 +67,13 @@ export async function loadToolInfo(): Promise<void> {
 }
 
 export function getToolDisplayName(id: string): string {
-  return cache?.get(id) ?? id;
+  return cache?.get(id)?.displayName ?? id;
+}
+
+/** Returns the registry-backed CLI resume shape when `list_tools` has loaded,
+ *  `null` when the registered tool has no CLI resume support, or `undefined`
+ *  before the boot IPC resolves (or for unregistered tool ids). */
+export function getToolResumeShape(id: string): ToolResumeShape | null | undefined {
+  if (!cache || !cache.has(id)) return undefined;
+  return cache.get(id)!.resume;
 }

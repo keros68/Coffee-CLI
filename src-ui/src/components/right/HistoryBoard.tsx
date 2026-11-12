@@ -9,6 +9,7 @@ import {
   prefetchHistory,
   subscribeHistory,
   getHistorySnapshot,
+  savedAtMs,
   sortByMtime,
 } from '../../lib/history-cache';
 import { subscribeHidden, getHiddenSnapshot, hideSession } from '../../lib/hidden-sessions';
@@ -20,6 +21,7 @@ import {
   subscribeGroups,
   getGroupsSnapshot,
   bucketSessions,
+  normalizeCwd,
   sessionKey,
   renameGroup,
   deleteGroup,
@@ -28,89 +30,16 @@ import {
   ensureProjectPrefix,
   type SessionGroup,
 } from '../../lib/session-groups';
+import { getToolIcon as getRegistryToolIcon } from '../../lib/tool-icons';
 import { SessionCard, SessionSectionHeader } from './SessionCard';
 import { SessionContextMenu, type SessionCtxMenuState } from './SessionContextMenu';
 import { useTextContextMenu } from '../../lib/use-text-context-menu';
-// hermes/opencode PNG assets live in src/icons-inline/ so the Launchpad
-// can `?inline`-import them as data URIs and bypass the <img> async-decode
-// flash. We pull the same data URIs here so HistoryBoard doesn't need a
-// separate file copy on disk.
-import CLAUDE_DATA_URL from '../../icons-inline/claude.svg?inline';
-import MIMOCODE_DATA_URL from '../../icons-inline/mimocode.png?inline';
-import HERMES_DATA_URL from '../../icons-inline/hermes.png?inline';
-import OPENCODE_DATA_URL from '../../icons-inline/opencode.png?inline';
-// Kimi Code (PNG squircle) — fixed-color brand mark, ?inline data URI.
-import KIMICODE_DATA_URL from '../../icons-inline/kimicode.png?inline';
-// Pi is a fixed-color brand mark, rendered as an INLINE SVG so it shares the
-// synchronous rendering path used by CenterPanel (?raw + inlineSvgIcon).
-import PI_SVG from '../../icons-inline/pi.svg?raw';
-import OMP_SVG from '../../icons-inline/omp.svg?raw';
-// Grok Build - monochrome currentColor mark rendered inline so it inherits
-// the surrounding text color across light/dark themes.
-import GROK_SVG from '../../icons-inline/grok.svg?raw';
-// OpenClaw (lobster mascot) — full-color brand mark (red gradient + teal
-// eyes), NOT currentColor, so it renders as an INLINE SVG rather than <img>;
-// inlining shares the same SVG bytes CenterPanel uses, no duplicate file on
-// disk. The markup carries its own fills, so it does NOT go through the
-// currentColor branch above.
-import OPENCLAW_SVG from '../../icons-inline/openclaw.svg?raw';
-// CodeBuddy — same full-color inline treatment as OpenClaw (gradient squircle
-// with its own fills, no currentColor).
-import CODEBUDDY_SVG from '../../icons-inline/codebuddy.svg?raw';
 import './HistoryBoard.css';
 
-// Tool icons — codex/qwen load via <img src=public/...>
-// because HistoryBoard mounts once at app start and never re-mounts on tab
-// switch, so the one-time decode flash is invisible. Other imported assets
-// share the same bytes the Launchpad uses (no duplicate files).
-
-const TOOL_ICON_SRC: Record<string, string> = {
-  claude:      CLAUDE_DATA_URL,
-  codex:       '/icons/tools/codex.svg',
-  qwen:        '/icons/tools/qwen.svg',
-  antigravity: '/icons/tools/antigravity.svg',
-  hermes:      HERMES_DATA_URL,
-  opencode:    OPENCODE_DATA_URL,
-  kimicode:    KIMICODE_DATA_URL,
-  mimocode:    MIMOCODE_DATA_URL,
-  kilo:        '/icons/tools/kilo.svg',
-};
-
-const getToolIcon = (tool: string) => {
-  // Pi is a fixed-color brand mark. Keep it inline so it shares the
-  // synchronous rendering path used by the launchpad; other fixed-color
-  // brand marks stay <img>.
-  if (tool === 'pi' || tool === 'grok' || tool === 'omp') {
-    const svg = tool === 'pi' ? PI_SVG : tool === 'omp' ? OMP_SVG : GROK_SVG;
-    return (
-      <span
-        aria-hidden
-        style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '1em', height: '1em', flexShrink: 0 }}
-        dangerouslySetInnerHTML={{ __html: svg }}
-      />
-    );
-  }
-  // OpenClaw / CodeBuddy are full-color brand marks (lobster gradient; teal →
-  // violet squircle) — inline SVG with their own fills, NOT currentColor.
-  // Renders as an inline span so the markup's hardcoded colors show verbatim
-  // (an <img> would also work, but we reuse the same SVG bytes CenterPanel
-  // imports).
-  if (tool === 'openclaw' || tool === 'codebuddy') {
-    return (
-      <span
-        aria-hidden
-        style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: '1em', height: '1em', flexShrink: 0 }}
-        dangerouslySetInnerHTML={{ __html: tool === 'codebuddy' ? CODEBUDDY_SVG : OPENCLAW_SVG }}
-      />
-    );
-  }
-  const src = TOOL_ICON_SRC[tool];
-  if (!src) return <div style={{ width: 14, height: 14, flexShrink: 0, borderRadius: 'var(--radius-xs)', background: '#555' }}/>;
-  const extra = (tool === 'hermes' || tool === 'opencode' || tool === 'kilo') ? { borderRadius: 'var(--radius-xs)', objectFit: 'cover' as const }
-    : tool === 'kimicode' ? { borderRadius: 'var(--radius-xs)', objectFit: 'contain' as const }
-    : {};
-  return <img src={src} alt="" style={{ width: '1em', height: '1em', flexShrink: 0, objectFit: 'contain', ...extra }}/>;
-};
+const getToolIcon = (tool: string) =>
+  getRegistryToolIcon(tool) ?? (
+    <div style={{ width: 14, height: 14, flexShrink: 0, borderRadius: 'var(--radius-xs)', background: '#555' }} />
+  );
 
 const getToolName = (tool: string) => getToolDisplayName(tool);
 
@@ -121,27 +50,17 @@ const getToolName = (tool: string) => getToolDisplayName(tool);
 // legacy sessions that predate cwd capture, or whose ~/.claude.json
 // project entry is gone).
 const projectName = (cwd: string, tool: string) => {
-  // OpenClaw has no user-project concept — its sessions all carry the same
-  // internal `~/.openclaw/workspace` cwd, so the basename would print the
-  // meaningless "workspace" on every card. Show the tool name instead,
-  // matching the project-filter dropdown that already excludes openclaw
-  // (it has no user-project concept). Same story as the launchpad: the row
-  // should read "OpenClaw", not a leaked internal folder name.
   if (tool === 'openclaw') {
     return getToolName(tool);
   }
   if (cwd) {
-    const trimmed = cwd.replace(/[\\/]+$/, '');
-    const idx = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'));
-    if (idx >= 0) return trimmed.slice(idx + 1);
-    if (trimmed) return trimmed;
+    const base = pathBasename(cwd);
+    if (base) return base;
   }
   return getToolName(tool);
 };
 
-// Normalize a recorded cwd for grouping: trim trailing slashes and unify
-// separators. Deliberately NOT case-folded — Linux paths are case-sensitive.
-const normCwd = (cwd: string) => cwd.replace(/[\\/]+$/, '').replace(/\//g, '\\');
+const normCwd = normalizeCwd;
 
 // Last path segment of either separator flavor.
 const pathBasename = (p: string) => {
@@ -541,13 +460,8 @@ export function HistoryBoard() {
   // ── Row rendering (shared by both list shapes) ───────────────────────
 
   const dateLabel = (session: SavedSession) => {
-    // Parse saved_at carefully to handle unix ms strings or invalid SystemTime strings
-    let savedMs = Date.parse(session.saved_at);
-    if (isNaN(savedMs)) {
-      const num = Number(session.saved_at);
-      if (!isNaN(num) && num > 0) savedMs = num < 1e11 ? num * 1000 : num;
-      else savedMs = nowMs - 86400000;
-    }
+    const parsedSavedMs = savedAtMs(session.saved_at);
+    const savedMs = parsedSavedMs > 0 ? parsedSavedMs : nowMs - 86400000;
     const dateDiff = nowMs - savedMs;
     const now = new Date(nowMs);
     const savedDate = new Date(savedMs);
