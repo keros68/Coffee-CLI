@@ -226,6 +226,10 @@ export const commands = {
    *  Uses the native backend so WebView2 never shows a permission prompt. */
   readClipboardImage: () => invoke<string | null>('read_clipboard_image'),
 
+  /** Paste an image directly from the native OS clipboard into the active
+   *  window via synthetic Ctrl+V / Cmd+V (used by Claude Code / Codex TUIs). */
+  pasteClipboardImageNative: () => invoke<boolean>('paste_clipboard_image_native'),
+
   listDirectory: (path: string) => invoke<DirEntryInfo[]>('list_directory', { path }),
   listSystemFonts: () => invoke<FontInfo[]>('list_system_fonts'),
 
@@ -304,7 +308,24 @@ export const commands = {
     invoke<Record<string, ToolConfigEntry>>('get_all_tool_configs'),
   setToolConfig: (tool: string, entry: ToolConfigEntry) =>
     invoke<void>('set_tool_config', { tool, entry }),
+
+  // ─── Per-tool global memory file (CLAUDE.md / AGENTS.md / GEMINI.md / SOUL.md) ───
+  readToolMemory: (tool: string) =>
+    invoke<ToolMemoryDocument>('read_tool_memory', { toolId: tool }),
+  saveToolMemory: (tool: string, content: string) =>
+    invoke<ToolMemoryDocument>('write_tool_memory', { toolId: tool, content }),
 };
+
+/** Resolve a file to its on-disk text (empty string when missing / binary). */
+export const readTextFile = (path: string) =>
+  invoke<string | null>('read_text_file', { path }).then((text) => text ?? '');
+
+export interface ToolMemoryDocument {
+  path: string;
+  fileName: string;
+  content: string;
+  exists: boolean;
+}
 
 // In-app self-update progress, emitted by download_and_install_update.
 export interface SelfUpdateProgress {

@@ -477,3 +477,33 @@
   background: var(--bg-hover);
   color: var(--text-1);
 }
+
+.history-card-active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-card));
+}
+
+.history-card-working-indicator,
+.history-card-attention-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.history-card-working-indicator {
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+  animation: history-card-pulse 1.4s ease-in-out infinite;
+}
+
+.history-card-attention-indicator {
+  background: var(--warning, #f59e0b);
+  box-shadow: 0 0 6px var(--warning, #f59e0b);
+}
+
+@keyframes history-card-pulse {
+  0%, 100% { opacity: 0.45; transform: scale(0.92); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+

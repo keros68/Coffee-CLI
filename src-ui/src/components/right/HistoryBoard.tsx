@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { useT } from '../../i18n/useT';
-import { useAppState, type ToolType } from '../../store/app-state';
+import { useAppState, getTabOrder, type ToolType } from '../../store/app-state';
 import { isTauri } from '../../tauri';
 import type { SavedSession } from '../../tauri';
 import { getToolDisplayName } from '../../lib/tool-info';
@@ -25,7 +25,7 @@ import {
   deleteGroup,
   setGroupCollapsed,
   setGroupRule,
-  stripProjectPrefix,
+  ensureProjectPrefix,
   type SessionGroup,
 } from '../../lib/session-groups';
 import { SessionCard, SessionSectionHeader } from './SessionCard';
@@ -201,6 +201,10 @@ export function HistoryBoard() {
   // (null = all). The option list is derived from the *visible* (unhidden)
   // data so its counts always match what the list would show.
   const [activeProject, setActiveProject] = useState<string | null>(null);
+  const [activeTool, setActiveTool] = useState<string | null>(null);
+  const [toolFilterOpen, setToolFilterOpen] = useState(false);
+  const [toolFilterPos, setToolFilterPos] = useState<{ left: number; top: number; width: number } | null>(null);
+  const toolFilterRef = useRef<HTMLButtonElement>(null);
   // The filter is a themed dropdown (NOT a native <select> — that can't be
   // themed, and can't even open while a terminal is active because the
   // global focus enforcer steals focus back; see FontPicker.tsx). React-
@@ -211,6 +215,7 @@ export function HistoryBoard() {
 
   const toggleFilterMenu = () => {
     if (filterMenuOpen) { setFilterMenuOpen(false); return; }
+    setToolFilterOpen(false);
     const r = filterTriggerRef.current?.getBoundingClientRect();
     if (r) {
       // Right-align to the trigger — the menu is wider than the button and
@@ -219,6 +224,17 @@ export function HistoryBoard() {
       setFilterMenuPos({ left: r.right - width, top: r.bottom + 4, width });
     }
     setFilterMenuOpen(true);
+  };
+
+  const toggleToolFilter = () => {
+    if (toolFilterOpen) { setToolFilterOpen(false); return; }
+    setFilterMenuOpen(false);
+    const r = toolFilterRef.current?.getBoundingClientRect();
+    if (r) {
+      const width = Math.max(r.width, 160);
+      setToolFilterPos({ left: r.right - width, top: r.bottom + 4, width });
+    }
+    setToolFilterOpen(true);
   };
 
   // Keep the portaled menu glued to its trigger on scroll/resize (it's
@@ -242,11 +258,16 @@ export function HistoryBoard() {
   // Escape closes the portaled filter menu — same dismissal UX as the right-
   // click menu and the rename input.
   useEffect(() => {
-    if (!filterMenuOpen) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setFilterMenuOpen(false); };
+    if (!filterMenuOpen && !toolFilterOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setFilterMenuOpen(false);
+        setToolFilterOpen(false);
+      }
+    };
     document.addEventListener('keydown', onKey);
     return () => { document.removeEventListener('keydown', onKey); };
-  }, [filterMenuOpen]);
+  }, [filterMenuOpen, toolFilterOpen]);
   // Right-click cut/copy/paste/select menu for the search box (same one
   // Gambit/terminal/task-list use).
   const { menu: ctxMenuEl, openMenu: openCtxMenu } = useTextContextMenu();
@@ -319,6 +340,65 @@ export function HistoryBoard() {
   }, [projectCounts, activeProject, filterMenuOpen]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  const toolCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const s of baseSessions) {
+      const tool = (s.tool ?? '').trim();
+      if (!tool || hidden.has(`${tool}:${s.id}`)) continue;
+      if (activeProject && (!s.cwd || normCwd(s.cwd) !== activeProject)) continue;
+      counts.set(tool, (counts.get(tool) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([tool, count]) => ({ tool, count }))
+      .sort((a, b) => b.count - a.count);
+  }, [baseSessions, hidden, activeProject]);
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (toolCounts.length < 2 && toolFilterOpen) {
+      setToolFilterOpen(false);
+    }
+    if (activeTool && !toolCounts.some(tc => tc.tool === activeTool)) {
+      setActiveTool(null);
+    }
+  }, [toolCounts, activeTool, toolFilterOpen]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Live running terminals indexed by `${tool}:${resumeToken}` so the session
+  // list can show working / attention badges and float running sessions to the
+  // top in a stable tab-creation order.
+  const runningByToken = useMemo(() => {
+    const map = new Map<string, { tabId: string; order: number; isWorking: boolean; needsAttention: boolean; isActive: boolean }>();
+    const order = getTabOrder(state);
+    for (const term of state.terminals) {
+      if (!term.resumeToken) continue;
+      const key = `${term.tool}:${term.resumeToken}`;
+      const isWorking = term.agentStatus === 'working';
+      const needsAttention = term.agentStatus === 'wait_input';
+      const isActive = state.activeTerminalId === term.id && !state.previewTabActive;
+      map.set(key, {
+        tabId: term.id,
+        order: order.indexOf(term.id),
+        isWorking,
+        needsAttention,
+        isActive,
+      });
+    }
+    return map;
+  }, [state]);
+
+  const runningSessionOrder = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const s of baseSessions) {
+      const tokenKey = s.session_token ? `${s.tool ?? ''}:${s.session_token}` : `${s.tool ?? ''}:${s.id}`;
+      const live = runningByToken.get(tokenKey);
+      if (live) {
+        map.set(`${s.tool ?? ''}:${s.id}`, live.order);
+      }
+    }
+    return map;
+  }, [baseSessions, runningByToken]);
+
   // Debounce the raw query so fast typing doesn't re-filter the full session
   // list on every keystroke (history-cache can hold thousands of sessions —
   // a per-key full scan stutters). 150ms is short enough to feel instant and
@@ -329,15 +409,21 @@ export function HistoryBoard() {
     return () => clearTimeout(h);
   }, [sessionSearchQuery]);
 
-  // Title on screen for one row: manual rename > auto name > the tool's own
-  // title. Used by the card and by the rename draft. A manual name is shown
-  // as typed; the others drop a leading project prefix the meta line repeats.
+  // Title on screen for one row: manual rename > auto name (`项目｜目标`) >
+  // the tool's own title (prefixed with `项目｜`). Never strip the project
+  // prefix — unified `项目｜目标` naming is a core convention of our fork.
   const displayedName = (s: SavedSession) => {
     const k = `${s.tool ?? ''}:${s.id}`;
     const manual = renamed[k];
     if (manual != null) return manual;
-    const generated = autoNameOn ? autoNamed[k] : undefined;
-    return stripProjectPrefix(generated ?? s.name, s);
+    if (!autoNameOn) return s.name;
+    // If the CLI/hook already wrote a `模块｜目标` title directly into s.name,
+    // keep it as-is.
+    if (s.name && (s.name.includes('｜') || s.name.includes(' | '))) {
+      return s.name;
+    }
+    const generated = autoNamed[k];
+    return ensureProjectPrefix(generated ?? s.name, s);
   };
 
   // Normalize once: trim + collapse runs of whitespace + lowercase. Empty after
@@ -360,6 +446,10 @@ export function HistoryBoard() {
     if (activeProject) {
       list = list.filter(s => !!s.cwd && normCwd(s.cwd) === activeProject);
     }
+    const currentToolFilter = typeof activeTool !== 'undefined' ? activeTool : null;
+    if (currentToolFilter) {
+      list = list.filter(s => (s.tool ?? '') === currentToolFilter);
+    }
     const q = debouncedQuery.trim().replace(/\s+/g, ' ').toLowerCase();
     if (q) {
       list = list.filter(s => {
@@ -376,18 +466,27 @@ export function HistoryBoard() {
         return name.includes(q) || original.includes(q) || proj.includes(q) || tool.includes(q);
       });
     }
-    // Pinned (置顶) sessions sort to the top. history-cache already returns
-    // saved_at desc, so a stable sort on the pinned flag keeps that order
-    // within each group. Skipped entirely when nothing is pinned.
-    if (pinned.size > 0) {
+    // Pinned (置顶) sessions sort to the top, followed by live running sessions
+    // in stable tab-creation order, then mtime desc.
+    const liveOrder = typeof runningSessionOrder !== 'undefined' ? runningSessionOrder : null;
+    const hasRunning = liveOrder ? liveOrder.size > 0 : false;
+    if (pinned.size > 0 || hasRunning) {
       list = [...list].sort((a, b) => {
-        const pa = pinned.has(`${a.tool ?? ''}:${a.id}`) ? 1 : 0;
-        const pb = pinned.has(`${b.tool ?? ''}:${b.id}`) ? 1 : 0;
-        return pb - pa;
+        const ka = `${a.tool ?? ''}:${a.id}`;
+        const kb = `${b.tool ?? ''}:${b.id}`;
+        const pa = pinned.has(ka) ? 1 : 0;
+        const pb = pinned.has(kb) ? 1 : 0;
+        if (pa !== pb) return pb - pa;
+        const ra = liveOrder?.get(ka);
+        const rb = liveOrder?.get(kb);
+        if (ra !== undefined && rb !== undefined) return ra - rb;
+        if (ra !== undefined) return -1;
+        if (rb !== undefined) return 1;
+        return 0;
       });
     }
     return list;
-  }, [baseSessions, debouncedQuery, hidden, pinned, activeProject, renamed, autoNamed, autoNameOn]);
+  }, [baseSessions, debouncedQuery, hidden, pinned, activeProject, activeTool, renamed, autoNamed, autoNameOn, runningSessionOrder]);
 
   // Progressive render: data is already fully in memory (history-cache reads
   // every jsonl on startup), so "load more" is just rendering more rows.
@@ -410,7 +509,7 @@ export function HistoryBoard() {
   // or short section can't fire an observer for a list nobody is reading.
   const [visibleBySection, setVisibleBySection] = useState<Record<string, number>>({});
   /* eslint-disable-next-line react-hooks/set-state-in-effect -- A changed query/filter starts a new pagination window. */
-  useEffect(() => { setVisibleCount(PAGE); setVisibleBySection({}); }, [debouncedQuery, activeProject]);
+  useEffect(() => { setVisibleCount(PAGE); setVisibleBySection({}); }, [debouncedQuery, activeProject, activeTool]);
   const filteredSessions = matchedSessions.slice(0, visibleCount);
   const hasMore = matchedSessions.length > visibleCount;
 
@@ -475,8 +574,20 @@ export function HistoryBoard() {
     return savedDate.toLocaleDateString(locale, { month: 'short', day: 'numeric' });
   };
 
+  const deleteSession = (session: SavedSession) => {
+    const token = session.session_token || session.id;
+    for (const term of state.terminals) {
+      if (term.tool === session.tool && term.resumeToken && (term.resumeToken === token || term.resumeToken === session.id)) {
+        dispatch({ type: 'REMOVE_TERMINAL', id: term.id });
+      }
+    }
+    hideSession(session.tool ?? '', session.id);
+  };
+
   const renderCard = (session: SavedSession) => {
     const rowKey = sessionKey(session.tool, session.id);
+    const tokenKey = session.session_token ? `${session.tool ?? ''}:${session.session_token}` : rowKey;
+    const live = runningByToken.get(tokenKey);
     const messages = session.turn_count
       ? ` · ${(t('task.messages') || '{count} messages').replace('{count}', session.turn_count.toString())}`
       : '';
@@ -489,6 +600,11 @@ export function HistoryBoard() {
         metaText={`${projectName(session.cwd, session.tool)} · ${dateLabel(session)}${messages}`}
         isRenaming={renamingKey === rowKey}
         renameValue={renameValue}
+        isWorking={live?.isWorking}
+        needsAttention={live?.needsAttention}
+        isActive={live?.isActive}
+        attentionLabel={t('session.needs_attention') || 'Waiting for you'}
+        workingLabel={t('session.working') || 'Working'}
         onOpen={() => handleViewHistory(session)}
         onContextMenu={(e) => {
           e.preventDefault();
@@ -507,7 +623,7 @@ export function HistoryBoard() {
           cancelRenameRef.current = true;
           setRenamingKey(null);
         }}
-        onHide={() => hideSession(session.tool ?? '', session.id)}
+        onHide={() => deleteSession(session)}
       />
     );
   };
@@ -532,6 +648,13 @@ export function HistoryBoard() {
     // saved.cwd. Sessions without a token (legacy / unresolved cwd) are
     // silently skipped — nothing to resume.
     if (!saved.session_token) return;
+    const existing = state.terminals.find(
+      term => term.tool === saved.tool && term.resumeToken === saved.session_token
+    );
+    if (existing) {
+      dispatch({ type: 'SET_ACTIVE_TERMINAL', id: existing.id });
+      return;
+    }
     const targetId = crypto.randomUUID();
     dispatch({
       type: 'ADD_TERMINAL',
@@ -574,6 +697,28 @@ export function HistoryBoard() {
               {activeProject
                 ? projectLabel(projectCounts.find(p => p.key === activeProject)?.cwd ?? '')
                 : (t('task.filter_all_projects') || 'All projects')}
+            </span>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+        )}
+        {toolCounts.length >= 2 && (
+          <button
+            ref={toolFilterRef}
+            type="button"
+            className={`history-tool-filter-trigger${activeTool ? ' active' : ''}`}
+            onClick={toggleToolFilter}
+          >
+            {activeTool ? getToolIcon(activeTool) : (
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+              </svg>
+            )}
+            <span className="history-tool-filter-label">
+              {activeTool
+                ? getToolName(activeTool)
+                : (t('task.filter_all_tools') || 'All tools')}
             </span>
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M6 9l6 6 6-6" />
@@ -715,11 +860,43 @@ export function HistoryBoard() {
       </>,
       document.body
     )}
+    {toolFilterOpen && toolFilterPos && createPortal(
+      <>
+        <div className="history-tool-filter-backdrop" onClick={() => setToolFilterOpen(false)} />
+        <div
+          className="history-tool-filter-menu"
+          style={{ position: 'fixed', left: toolFilterPos.left, top: toolFilterPos.top, width: toolFilterPos.width }}
+        >
+          <button
+            type="button"
+            className={`history-tool-filter-opt${activeTool === null ? ' active' : ''}`}
+            onClick={() => { setActiveTool(null); setToolFilterOpen(false); }}
+          >
+            <span className="history-tool-filter-opt-name">{t('task.filter_all_tools') || 'All tools'}</span>
+            <span className="history-tool-filter-count">{toolCounts.reduce((n, tc) => n + tc.count, 0)}</span>
+          </button>
+          {toolCounts.map((tc) => (
+            <button
+              type="button"
+              key={tc.tool}
+              className={`history-tool-filter-opt${activeTool === tc.tool ? ' active' : ''}`}
+              onClick={() => { setActiveTool(activeTool === tc.tool ? null : tc.tool); setToolFilterOpen(false); }}
+            >
+              {getToolIcon(tc.tool)}
+              <span className="history-tool-filter-opt-name">{getToolName(tc.tool)}</span>
+              <span className="history-tool-filter-count">{tc.count}</span>
+            </button>
+          ))}
+        </div>
+      </>,
+      document.body
+    )}
     {ctxMenu && (
       <SessionContextMenu
         menu={ctxMenu}
         onClose={() => setCtxMenu(null)}
         onRename={startRename}
+        onDelete={deleteSession}
       />
     )}
     {ctxMenuEl}

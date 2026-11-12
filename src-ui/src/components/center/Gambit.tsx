@@ -15,7 +15,7 @@
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
-import { clipboardRead, clipboardWrite } from '../../lib/clipboard';
+import { clipboardRead, clipboardReadImage, clipboardWrite } from '../../lib/clipboard';
 import { subscribeGambitHistory, getGambitHistorySnapshot, pushGambitHistory } from '../../lib/gambit-history';
 import { commands } from '../../tauri';
 import { useT } from '../../i18n/useT';
@@ -473,21 +473,45 @@ function GambitImpl({
     setCtxMenu(null);
   };
 
+  const insertPathsIntoDraft = (paths: string[], selStart: number, selEnd: number) => {
+    const before = draft.slice(0, selStart);
+    const after = draft.slice(selEnd);
+    const leftPad = before.length > 0 && !/\s$/.test(before) ? ' ' : '';
+    const rightPad = after.length > 0 && !/^\s/.test(after) ? ' ' : '';
+    const inserted = leftPad + paths.join(' ') + rightPad;
+    const newDraft = before + inserted + after;
+    onDraftChange(newDraft);
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      const caret = selStart + inserted.length;
+      ta.selectionStart = caret;
+      ta.selectionEnd = caret;
+    });
+  };
+
   const ctxPaste = () => {
     const textarea = textareaRef.current;
     if (!textarea) { setCtxMenu(null); return; }
     setCtxMenu(null);
-    clipboardRead().then((text) => {
-      if (!text) return;
-      const start = textarea.selectionStart ?? draft.length;
-      const end = textarea.selectionEnd ?? draft.length;
-      const newDraft = draft.slice(0, start) + text + draft.slice(end);
-      onDraftChange(newDraft);
-      requestAnimationFrame(() => {
-        textarea.focus();
-        textarea.selectionStart = start + text.length;
-        textarea.selectionEnd = start + text.length;
-      });
+    const start = textarea.selectionStart ?? draft.length;
+    const end = textarea.selectionEnd ?? draft.length;
+    clipboardRead().then(async (text) => {
+      if (text) {
+        const newDraft = draft.slice(0, start) + text + draft.slice(end);
+        onDraftChange(newDraft);
+        requestAnimationFrame(() => {
+          textarea.focus();
+          textarea.selectionStart = start + text.length;
+          textarea.selectionEnd = start + text.length;
+        });
+        return;
+      }
+      const imagePath = await clipboardReadImage();
+      if (imagePath) {
+        insertPathsIntoDraft([imagePath], start, end);
+      }
     });
   };
 
@@ -617,26 +641,33 @@ function GambitImpl({
 
   const onPaste = async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const items = e.clipboardData?.items;
-    if (!items) return;
-    // Collect all image files first (rare — clipboard normally has ≤1 image).
-    // Validate BEFORE preventing default: if getAsFile() returns null
-    // (some Windows clipboard sources do this), we must NOT block the
-    // native paste or the user loses their clipboard content.
-    const imageFiles: { file: File; ext: string }[] = [];
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      if (item.kind !== 'file' || !item.type.startsWith('image/')) continue;
-      const file = item.getAsFile();
-      if (!file) continue;
-      imageFiles.push({ file, ext: (item.type.split('/')[1] || 'png').toLowerCase() });
-    }
-    if (imageFiles.length === 0) return;
-
-    e.preventDefault();
-
+    const plainText = e.clipboardData?.getData('text/plain') ?? '';
     const textarea = textareaRef.current;
     const selStart = textarea?.selectionStart ?? draft.length;
     const selEnd = textarea?.selectionEnd ?? draft.length;
+
+    const imageFiles: { file: File; ext: string }[] = [];
+    if (items) {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind !== 'file' || !item.type.startsWith('image/')) continue;
+        const file = item.getAsFile();
+        if (!file) continue;
+        imageFiles.push({ file, ext: (item.type.split('/')[1] || 'png').toLowerCase() });
+      }
+    }
+
+    if (imageFiles.length === 0) {
+      if (plainText) return;
+      e.preventDefault();
+      const nativePath = await clipboardReadImage();
+      if (nativePath) {
+        insertPathsIntoDraft([nativePath], selStart, selEnd);
+      }
+      return;
+    }
+
+    e.preventDefault();
 
     const paths: string[] = [];
     for (const { file, ext } of imageFiles) {
@@ -647,26 +678,13 @@ function GambitImpl({
         console.error('[Gambit] save image failed', err);
       }
     }
+    if (paths.length === 0) {
+      const nativePath = await clipboardReadImage();
+      if (nativePath) paths.push(nativePath);
+    }
     if (paths.length === 0) return;
 
-    // Insert paths at the cursor as plain text. If there's adjacent
-    // non-whitespace text on either side, pad with spaces so AI CLI
-    // path detection doesn't glue the path onto surrounding prose.
-    const before = draft.slice(0, selStart);
-    const after = draft.slice(selEnd);
-    const leftPad = before.length > 0 && !/\s$/.test(before) ? ' ' : '';
-    const rightPad = after.length > 0 && !/^\s/.test(after) ? ' ' : '';
-    const inserted = leftPad + paths.join(' ') + rightPad;
-    const newDraft = before + inserted + after;
-    onDraftChange(newDraft);
-    requestAnimationFrame(() => {
-      const ta = textareaRef.current;
-      if (!ta) return;
-      ta.focus();
-      const caret = selStart + inserted.length;
-      ta.selectionStart = caret;
-      ta.selectionEnd = caret;
-    });
+    insertPathsIntoDraft(paths, selStart, selEnd);
   };
 
   // Suppress onClose usage warning — true close is driven by parent (Explorer

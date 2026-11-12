@@ -469,6 +469,7 @@ function ConversationContent({
   const onPendingResolvedRef = useRef(onPendingResolved);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [ctxMenu, setCtxMenu] = useState<TermContextMenuState | null>(null);
+  const [showScrollLatest, setShowScrollLatest] = useState(false);
   const copyResetTimerRef = useRef<number | null>(null);
   const pendingBaselineRef = useRef<{ sentAt: number; userCount: number } | null>(null);
   const competingBindingsRef = useRef(competingBindings);
@@ -853,11 +854,21 @@ function ConversationContent({
     if (!element) return;
     const onScroll = (event: Event) => {
       if (element.clientHeight === 0) return;
-      pinnedRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 72;
+      const isPinned = element.scrollHeight - element.scrollTop - element.clientHeight < 72;
+      pinnedRef.current = isPinned;
+      setShowScrollLatest(prev => prev === !isPinned ? prev : !isPinned);
       if (event.isTrusted && element.scrollTop < 520) loadOlderRef.current();
     };
     element.addEventListener('scroll', onScroll, { passive: true });
     return () => element.removeEventListener('scroll', onScroll);
+  }, []);
+
+  const scrollToLatest = useCallback(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    pinnedRef.current = true;
+    setShowScrollLatest(false);
+    element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' });
   }, []);
 
   // A heavily filtered page can contain fewer visible bubbles than one
@@ -1188,6 +1199,20 @@ function ConversationContent({
         )}
         </div>
       </div>
+      {showScrollLatest && messages.length > 0 && (
+        <button
+          type="button"
+          className="conversation-scroll-latest-btn"
+          onClick={scrollToLatest}
+          title={t('claude.scroll_latest')}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M12 5v14" />
+            <path d="m19 12-7 7-7-7" />
+          </svg>
+          <span>{t('claude.scroll_latest')}</span>
+        </button>
+      )}
       <textarea
         ref={selectAllProxyRef}
         className="conversation-selection-proxy"

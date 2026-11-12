@@ -95,12 +95,7 @@ pub fn save(cfg: &ToolConfig) -> std::io::Result<()> {
     let body = serde_json::to_string_pretty(cfg).map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
     })?;
-    // Atomic write so an interrupted save can't leave the file
-    // half-written and unparseable on the next launch.
-    let tmp = p.with_extension("json.tmp");
-    std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, &p)?;
-    Ok(())
+    crate::json_file::write_atomic(&p, body.as_bytes())
 }
 
 pub fn get(tool: &str) -> ToolConfigEntry {

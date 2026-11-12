@@ -423,41 +423,22 @@ fn read_text_file(path: String) -> Option<String> {
 }
 
 
-/// Save a base64-encoded clipboard image to a temp file.
-/// Used by the Gambit compose window so pasted screenshots can be referenced
-/// by path when forwarded to AI CLI agents (Claude Code, etc.).
-///
-/// Guards:
-/// - Extension whitelisted to common raster formats
-/// - Hard 25 MB size cap to prevent runaway base64 payloads filling the disk
-/// - Filename uses pid + atomic counter so two concurrent paste calls (same
-///   millisecond) can never collide and truncate each other's file
-#[tauri::command]
-fn save_clipboard_image(data_base64: String, extension: String) -> Result<String, String> {
-    use base64::{Engine as _, engine::general_purpose};
-    use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
+const MAX_CLIPBOARD_IMAGE_BYTES: usize = 25 * 1024 * 1024; // 25 MB encoded file cap
+const MAX_CLIPBOARD_RGBA_BYTES: usize = 256 * 1024 * 1024; // 256 MB raw RGBA cap (supports up to 8K screenshots)
 
-    const MAX_BYTES: usize = 25 * 1024 * 1024; // 25 MB
-
-    // Only allow common web image formats. Block anything that could
-    // execute or exploit a path-traversal quirk in the extension.
-    let ext = match extension.as_str() {
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => extension,
-        _ => return Err(format!("Unsupported image extension: {}", extension)),
-    };
-
-    let bytes = general_purpose::STANDARD
-        .decode(&data_base64)
-        .map_err(|e| format!("base64 decode: {}", e))?;
-
-    if bytes.len() > MAX_BYTES {
-        return Err(format!(
-            "Image too large: {} bytes (max {})",
-            bytes.len(),
-            MAX_BYTES
-        ));
+fn normalize_image_extension(extension: &str) -> Option<&'static str> {
+    match extension.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+        "png" => Some("png"),
+        "jpg" | "jpeg" | "pjpeg" | "jfif" => Some("jpg"),
+        "gif" => Some("gif"),
+        "webp" => Some("webp"),
+        "bmp" | "x-bmp" | "x-ms-bmp" | "dib" => Some("bmp"),
+        _ => None,
     }
+}
+
+fn next_clipboard_temp_path(ext: &str) -> Result<std::path::PathBuf, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     let tmp_dir = std::env::temp_dir().join("coffee-cli").join("pasted-images");
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("mkdir: {}", e))?;
@@ -469,8 +450,452 @@ fn save_clipboard_image(data_base64: String, extension: String) -> Result<String
         .unwrap_or(0);
     let pid = std::process::id();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let path = tmp_dir.join(format!("clip-{}-{}-{}.{}", stamp, pid, seq, ext));
+    Ok(tmp_dir.join(format!("clip-{}-{}-{}.{}", stamp, pid, seq, ext)))
+}
 
+fn encode_rgba_to_png_temp(width: u32, height: u32, rgba: &[u8]) -> Result<Option<String>, String> {
+    let expected_len = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .unwrap_or(0);
+    if width == 0 || height == 0 || expected_len == 0 || rgba.len() != expected_len {
+        return Ok(None);
+    }
+    if rgba.len() > MAX_CLIPBOARD_RGBA_BYTES {
+        return Err(format!(
+            "Clipboard bitmap too large: {} bytes (max {})",
+            rgba.len(),
+            MAX_CLIPBOARD_RGBA_BYTES
+        ));
+    }
+
+    let mut buf = std::io::Cursor::new(Vec::with_capacity(rgba.len() / 4));
+    {
+        let mut encoder = png::Encoder::new(&mut buf, width, height);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder
+            .write_header()
+            .map_err(|e| format!("png header: {}", e))?;
+        writer
+            .write_image_data(rgba)
+            .map_err(|e| format!("png encode: {}", e))?;
+    }
+
+    let png_bytes = buf.into_inner();
+    if png_bytes.len() > MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err(format!(
+            "Encoded clipboard image too large: {} bytes (max {})",
+            png_bytes.len(),
+            MAX_CLIPBOARD_IMAGE_BYTES
+        ));
+    }
+
+    let path = next_clipboard_temp_path("png")?;
+    std::fs::write(&path, png_bytes).map_err(|e| format!("write image file: {}", e))?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+/// Decode a Windows `CF_DIB` or `CF_DIBV5` buffer into `(width, height, rgba_bytes)`.
+pub(crate) fn decode_dib_to_rgba(dib: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    if dib.len() < 40 {
+        return None;
+    }
+    let bi_size = u32::from_le_bytes(dib[0..4].try_into().ok()?) as usize;
+    if bi_size < 40 || bi_size > dib.len() {
+        return None;
+    }
+    let raw_width = i32::from_le_bytes(dib[4..8].try_into().ok()?);
+    let raw_height = i32::from_le_bytes(dib[8..12].try_into().ok()?);
+    if raw_width <= 0 || raw_height == 0 || raw_height == i32::MIN {
+        return None;
+    }
+    let width = raw_width as u32;
+    let top_down = raw_height < 0;
+    let height = raw_height.unsigned_abs();
+    if width > 16384 || height > 16384 {
+        return None;
+    }
+    let planes = u16::from_le_bytes(dib[12..14].try_into().ok()?);
+    let bit_count = u16::from_le_bytes(dib[14..16].try_into().ok()?);
+    let compression = u32::from_le_bytes(dib[16..20].try_into().ok()?);
+    let clr_used = u32::from_le_bytes(dib[32..36].try_into().ok()?) as usize;
+    if planes != 1 {
+        return None;
+    }
+
+    if compression != 0 && compression != 3 && compression != 6 {
+        return None;
+    }
+
+    let rgba_len = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)?;
+    if rgba_len == 0 || rgba_len > MAX_CLIPBOARD_RGBA_BYTES {
+        return None;
+    }
+
+    let row_stride = ((width as usize).checked_mul(bit_count as usize)?.checked_add(31)? / 32)
+        .checked_mul(4)?;
+    let needed_pixel_bytes = row_stride.checked_mul(height as usize)?;
+
+    fn extract_channel(val: u32, mask: u32) -> u8 {
+        if mask == 0 {
+            return 0;
+        }
+        let shift = mask.trailing_zeros();
+        let shifted_mask = mask >> shift;
+        let bits = shifted_mask.trailing_ones();
+        if bits == 0 {
+            return 0;
+        }
+        let v = (val & mask) >> shift;
+        if bits >= 8 {
+            (v >> (bits - 8)) as u8
+        } else {
+            let max_val = (1u32 << bits) - 1;
+            ((v * 255 + (max_val / 2)) / max_val) as u8
+        }
+    }
+
+    let (r_mask, g_mask, b_mask, a_mask) = if bit_count == 32 || bit_count == 16 {
+        let default_masks = if bit_count == 32 {
+            (0x00ff0000u32, 0x0000ff00u32, 0x000000ffu32, 0xff000000u32)
+        } else {
+            (0x7c00u32, 0x03e0u32, 0x001fu32, 0u32)
+        };
+        if compression == 3 || compression == 6 || (bi_size >= 56 && bit_count == 32) {
+            if dib.len() >= 52 {
+                let mr = u32::from_le_bytes(dib[40..44].try_into().ok()?);
+                let mg = u32::from_le_bytes(dib[44..48].try_into().ok()?);
+                let mb = u32::from_le_bytes(dib[48..52].try_into().ok()?);
+                let ma = if (bi_size >= 56 || compression == 6) && dib.len() >= 56 {
+                    u32::from_le_bytes(dib[52..56].try_into().ok()?)
+                } else if bit_count == 32 && (mr | mg | mb) & 0xff000000 == 0 {
+                    0xff000000
+                } else {
+                    0
+                };
+                if mr != 0 || mg != 0 || mb != 0 {
+                    (mr, mg, mb, ma)
+                } else {
+                    default_masks
+                }
+            } else {
+                default_masks
+            }
+        } else {
+            default_masks
+        }
+    } else {
+        (0, 0, 0, 0)
+    };
+
+    let pixel_offset = match bit_count {
+        8 => {
+            let colors = if clr_used == 0 { 256 } else { clr_used.min(256) };
+            bi_size.checked_add(colors * 4)?
+        }
+        16 | 24 | 32 => {
+            if bi_size == 40 {
+                if compression == 3 {
+                    if dib.len() == 40 + 16 + needed_pixel_bytes {
+                        56
+                    } else {
+                        52
+                    }
+                } else if compression == 6 {
+                    56
+                } else {
+                    40
+                }
+            } else if (compression == 3 || compression == 6)
+                && dib.len() >= bi_size + 12 + needed_pixel_bytes
+            {
+                bi_size + 12
+            } else {
+                bi_size
+            }
+        }
+        _ => return None,
+    };
+
+    if dib.len() < pixel_offset.checked_add(needed_pixel_bytes)? {
+        return None;
+    }
+
+    let pixels = &dib[pixel_offset..pixel_offset + needed_pixel_bytes];
+    let mut rgba = vec![0u8; rgba_len];
+    let mut any_nonzero_alpha = false;
+
+    for out_y in 0..(height as usize) {
+        let src_y = if top_down {
+            out_y
+        } else {
+            (height as usize) - 1 - out_y
+        };
+        let src_row = &pixels[src_y * row_stride..(src_y + 1) * row_stride];
+        let dst_row = &mut rgba[out_y * (width as usize) * 4..(out_y + 1) * (width as usize) * 4];
+
+        match bit_count {
+            32 => {
+                if r_mask == 0x00ff0000 && g_mask == 0x0000ff00 && b_mask == 0x000000ff {
+                    for (src_px, dst_px) in src_row
+                        .chunks_exact(4)
+                        .take(width as usize)
+                        .zip(dst_row.chunks_exact_mut(4))
+                    {
+                        dst_px[0] = src_px[2];
+                        dst_px[1] = src_px[1];
+                        dst_px[2] = src_px[0];
+                        let a = if a_mask == 0xff000000 { src_px[3] } else { 255 };
+                        if a != 0 {
+                            any_nonzero_alpha = true;
+                        }
+                        dst_px[3] = a;
+                    }
+                } else {
+                    for (src_px, dst_px) in src_row
+                        .chunks_exact(4)
+                        .take(width as usize)
+                        .zip(dst_row.chunks_exact_mut(4))
+                    {
+                        let v = u32::from_le_bytes([src_px[0], src_px[1], src_px[2], src_px[3]]);
+                        dst_px[0] = extract_channel(v, r_mask);
+                        dst_px[1] = extract_channel(v, g_mask);
+                        dst_px[2] = extract_channel(v, b_mask);
+                        let a = if a_mask != 0 {
+                            extract_channel(v, a_mask)
+                        } else {
+                            255
+                        };
+                        if a != 0 {
+                            any_nonzero_alpha = true;
+                        }
+                        dst_px[3] = a;
+                    }
+                }
+            }
+            24 => {
+                any_nonzero_alpha = true;
+                for (src_px, dst_px) in src_row
+                    .chunks_exact(3)
+                    .take(width as usize)
+                    .zip(dst_row.chunks_exact_mut(4))
+                {
+                    dst_px[0] = src_px[2];
+                    dst_px[1] = src_px[1];
+                    dst_px[2] = src_px[0];
+                    dst_px[3] = 255;
+                }
+            }
+            16 => {
+                for (src_px, dst_px) in src_row
+                    .chunks_exact(2)
+                    .take(width as usize)
+                    .zip(dst_row.chunks_exact_mut(4))
+                {
+                    let v = u16::from_le_bytes([src_px[0], src_px[1]]) as u32;
+                    dst_px[0] = extract_channel(v, r_mask);
+                    dst_px[1] = extract_channel(v, g_mask);
+                    dst_px[2] = extract_channel(v, b_mask);
+                    let a = if a_mask != 0 {
+                        extract_channel(v, a_mask)
+                    } else {
+                        255
+                    };
+                    if a != 0 {
+                        any_nonzero_alpha = true;
+                    }
+                    dst_px[3] = a;
+                }
+            }
+            8 => {
+                any_nonzero_alpha = true;
+                let colors = if clr_used == 0 { 256 } else { clr_used.min(256) };
+                let palette = &dib[bi_size..bi_size + colors * 4];
+                for (&idx, dst_px) in src_row
+                    .iter()
+                    .take(width as usize)
+                    .zip(dst_row.chunks_exact_mut(4))
+                {
+                    let c = (idx as usize).min(colors.saturating_sub(1)) * 4;
+                    if c + 3 <= palette.len() {
+                        dst_px[0] = palette[c + 2];
+                        dst_px[1] = palette[c + 1];
+                        dst_px[2] = palette[c];
+                        dst_px[3] = 255;
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    if !any_nonzero_alpha {
+        for px in rgba.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+    }
+
+    Some((width, height, rgba))
+}
+
+#[cfg(windows)]
+fn try_read_clipboard_image_win32() -> Result<Option<String>, String> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{HANDLE, HGLOBAL, HWND};
+    use windows::Win32::System::DataExchange::{
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+        RegisterClipboardFormatW,
+    };
+    use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
+    use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+
+    struct ClipboardGuard;
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseClipboard();
+            }
+        }
+    }
+
+    unsafe fn read_hglobal_bytes(format: u32) -> Option<Vec<u8>> {
+        if IsClipboardFormatAvailable(format).is_err() {
+            return None;
+        }
+        let handle: HANDLE = GetClipboardData(format).ok()?;
+        if handle.0.is_null() {
+            return None;
+        }
+        let hglobal = HGLOBAL(handle.0);
+        let size = GlobalSize(hglobal);
+        if size == 0 || size > MAX_CLIPBOARD_RGBA_BYTES + 4096 {
+            return None;
+        }
+        let ptr = GlobalLock(hglobal) as *const u8;
+        if ptr.is_null() {
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(ptr, size).to_vec();
+        let _ = GlobalUnlock(hglobal);
+        Some(bytes)
+    }
+
+    let mut opened = false;
+    for attempt in 0..20 {
+        if unsafe { OpenClipboard(HWND::default()) }.is_ok() {
+            opened = true;
+            break;
+        }
+        if attempt < 19 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    if !opened {
+        return Ok(None);
+    }
+    let _guard = ClipboardGuard;
+
+    const PNG_SIG: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    for name in ["PNG\0", "image/png\0"] {
+        let wide: Vec<u16> = name.encode_utf16().collect();
+        let fmt = unsafe { RegisterClipboardFormatW(PCWSTR(wide.as_ptr())) };
+        if fmt != 0 {
+            if let Some(bytes) = unsafe { read_hglobal_bytes(fmt) } {
+                if bytes.len() >= PNG_SIG.len()
+                    && bytes.starts_with(PNG_SIG)
+                    && bytes.len() <= MAX_CLIPBOARD_IMAGE_BYTES
+                {
+                    let path = next_clipboard_temp_path("png")?;
+                    std::fs::write(&path, &bytes)
+                        .map_err(|e| format!("write clipboard png: {}", e))?;
+                    return Ok(Some(path.to_string_lossy().to_string()));
+                }
+            }
+        }
+    }
+
+    const CF_DIB: u32 = 8;
+    const CF_DIBV5: u32 = 17;
+    for fmt in [CF_DIBV5, CF_DIB] {
+        if let Some(dib) = unsafe { read_hglobal_bytes(fmt) } {
+            if let Some((width, height, rgba)) = decode_dib_to_rgba(&dib) {
+                drop(_guard);
+                return encode_rgba_to_png_temp(width, height, &rgba);
+            }
+        }
+    }
+
+    const CF_HDROP_FMT: u32 = 15;
+    if unsafe { IsClipboardFormatAvailable(CF_HDROP_FMT) }.is_ok() {
+        if let Ok(handle) = unsafe { GetClipboardData(CF_HDROP_FMT) } {
+            if !handle.0.is_null() {
+                let hdrop = HDROP(handle.0);
+                let count = unsafe { DragQueryFileW(hdrop, 0xFFFF_FFFF, None) };
+                for i in 0..count {
+                    let len = unsafe { DragQueryFileW(hdrop, i, None) };
+                    if len == 0 || len > 32768 {
+                        continue;
+                    }
+                    let mut buf = vec![0u16; (len as usize) + 1];
+                    let written = unsafe { DragQueryFileW(hdrop, i, Some(&mut buf)) };
+                    if written == 0 {
+                        continue;
+                    }
+                    let src_path = std::path::PathBuf::from(
+                        String::from_utf16_lossy(&buf[..written as usize]),
+                    );
+                    let Some(raw_ext) = src_path.extension().and_then(|e| e.to_str()) else {
+                        continue;
+                    };
+                    let Some(ext) = normalize_image_extension(raw_ext) else {
+                        continue;
+                    };
+                    if let Ok(meta) = std::fs::metadata(&src_path) {
+                        if meta.is_file()
+                            && meta.len() > 0
+                            && meta.len() <= MAX_CLIPBOARD_IMAGE_BYTES as u64
+                        {
+                            drop(_guard);
+                            let dst_path = next_clipboard_temp_path(ext)?;
+                            if std::fs::copy(&src_path, &dst_path).is_ok() {
+                                return Ok(Some(dst_path.to_string_lossy().to_string()));
+                            }
+                            return Ok(Some(src_path.to_string_lossy().to_string()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+#[tauri::command]
+fn save_clipboard_image(data_base64: String, extension: String) -> Result<String, String> {
+    use base64::{Engine as _, engine::general_purpose};
+    use std::io::Write;
+
+    let Some(ext) = normalize_image_extension(&extension) else {
+        return Err(format!("Unsupported image extension: {}", extension));
+    };
+
+    let bytes = general_purpose::STANDARD
+        .decode(&data_base64)
+        .map_err(|e| format!("base64 decode: {}", e))?;
+
+    if bytes.len() > MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err(format!(
+            "Image too large: {} bytes (max {})",
+            bytes.len(),
+            MAX_CLIPBOARD_IMAGE_BYTES
+        ));
+    }
+
+    let path = next_clipboard_temp_path(ext)?;
     let mut file = std::fs::File::create(&path)
         .map_err(|e| format!("create image file: {}", e))?;
     file.write_all(&bytes)
@@ -479,85 +904,25 @@ fn save_clipboard_image(data_base64: String, extension: String) -> Result<String
     Ok(path.to_string_lossy().to_string())
 }
 
-/// Read a still image from the system clipboard and persist it as a PNG temp
-/// file, returning the path (or `None` when the clipboard holds no image).
-///
-/// This replaces the old `navigator.clipboard.read()` path in the frontend,
-/// which violated the project's clipboard rule: WebView2 may pop a native
-/// "tauri.localhost wants to read the clipboard" permission prompt on every
-/// paste. Routing through Tauri's `plugin-clipboard-manager` (arboard) reads
-/// the OS clipboard directly with no permission prompt.
-///
-/// `read_image()` must NOT run on the main thread (deadlocks on Linux when
-/// the WebView also touches the clipboard), so the whole command is async and
-/// offloaded to `spawn_blocking`. The plugin returns raw RGBA — no original
-/// format — so we re-encode to PNG (screenshots paste as PNG anyway).
 #[tauri::command]
 async fn read_clipboard_image(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(windows)]
+        {
+            if let Some(path) = try_read_clipboard_image_win32()? {
+                return Ok(Some(path));
+            }
+        }
+
         use tauri_plugin_clipboard_manager::ClipboardExt;
 
         let image = match app.clipboard().read_image() {
             Ok(img) => img,
-            // No image in the clipboard, or clipboard temporarily unavailable
-            // (some apps hold an exclusive lock). Not an error — caller falls
-            // back to text paste.
             Err(_) => return Ok(None),
         };
 
-        let rgba = image.rgba();
-        let width = image.width();
-        let height = image.height();
-        if width == 0 || height == 0 || rgba.len() != (width as usize) * (height as usize) * 4 {
-            return Ok(None);
-        }
-
-        // 25 MB cap matches save_clipboard_image — bounds temp-disk usage from
-        // absurdly large clipboard bitmaps before we even attempt PNG deflate.
-        const MAX_BYTES: usize = 25 * 1024 * 1024;
-        if rgba.len() > MAX_BYTES {
-            return Err(format!(
-                "Clipboard image too large: {} bytes (max {})",
-                rgba.len(),
-                MAX_BYTES
-            ));
-        }
-
-        let tmp_dir = std::env::temp_dir().join("coffee-cli").join("pasted-images");
-        std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("mkdir: {}", e))?;
-
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let pid = std::process::id();
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = tmp_dir.join(format!("clip-{}-{}-{}.png", stamp, pid, seq));
-
-        // Encode RGBA → PNG. The png 0.17 encoder owns the writer; collect to
-        // a Vec then write once so a mid-encode failure can't leave a partial
-        // file that an AI CLI would later try to read as a real image.
-        let mut buf = std::io::Cursor::new(Vec::with_capacity(rgba.len()));
-        {
-            let mut encoder = png::Encoder::new(&mut buf, width, height);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            let mut writer = encoder
-                .write_header()
-                .map_err(|e| format!("png header: {}", e))?;
-            writer
-                .write_image_data(rgba)
-                .map_err(|e| format!("png encode: {}", e))?;
-        }
-
-        std::fs::write(&path, buf.into_inner())
-            .map_err(|e| format!("write image file: {}", e))?;
-
-        Ok(Some(path.to_string_lossy().to_string()))
+        encode_rgba_to_png_temp(image.width(), image.height(), image.rgba())
     })
     .await
     .map_err(|e| format!("join: {}", e))?
@@ -1012,6 +1377,13 @@ fn tier_terminal_start_blocking(
         _ => (cmd, args),
     };
 
+    let has_resume_token = resume_token.as_deref().is_some_and(|t| !t.is_empty());
+    let (args, launch_token) = if tool.as_deref() == Some("pi") && !has_resume_token {
+        terminal::prepare_pi_launch(args)
+    } else {
+        (args, resume_token.filter(|t| !t.is_empty()))
+    };
+
     // If a session with the same ID already exists (e.g. restart-in-place),
     // forcefully kill and remove it before spawning a fresh one.
     {
@@ -1064,6 +1436,16 @@ fn tier_terminal_start_blocking(
         extra_env,
     ).map_err(|e| format!("Failed to spawn PTY: {}", e))?;
 
+    if let Some(token) = launch_token {
+        watch_session_token(
+            app.clone(),
+            terminal_session.clone(),
+            session_id.clone(),
+            tool_name.clone(),
+            token,
+        );
+    }
+
     // Emit the initial CWD to the frontend so the left panel can map immediately.
     // On Windows, cmd.exe does not emit OSC 7, and full-screen agents enter alt-screen
     // before any shell prompt appears. This one-time emit bridges the gap.
@@ -1077,6 +1459,48 @@ fn tier_terminal_start_blocking(
     }
 
     Ok(())
+}
+
+fn watch_session_token(
+    app: tauri::AppHandle,
+    terminal_session: terminal::SharedSession,
+    session_id: String,
+    tool: Option<String>,
+    token: String,
+) {
+    if tool.as_deref() != Some("pi") {
+        let _ = app.emit(
+            "tier-terminal-token",
+            terminal::SessionTokenPayload {
+                id: session_id,
+                token,
+            },
+        );
+        return;
+    }
+
+    std::thread::spawn(move || {
+        loop {
+            let alive = terminal_session
+                .lock()
+                .ok()
+                .map_or(false, |map| map.contains_key(&session_id));
+            if !alive {
+                return;
+            }
+            if terminal::find_pi_session_file_by_id(&token).is_some() {
+                let _ = app.emit(
+                    "tier-terminal-token",
+                    terminal::SessionTokenPayload {
+                        id: session_id,
+                        token,
+                    },
+                );
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
 }
 
 
@@ -5556,7 +5980,7 @@ fn save_tasks(data: String, app: tauri::AppHandle) -> Result<(), String> {
     serde_json::from_str::<serde_json::Value>(&data)
         .map_err(|e| format!("Invalid task data (not valid JSON): {e}"))?;
     let path = tasks_file_path();
-    std::fs::write(&path, &data)
+    crate::json_file::write_atomic(&path, data.as_bytes())
         .map_err(|e| format!("Failed to save tasks: {}", e))?;
     // Notify all windows so other instances can reload
     let _ = app.emit("tasks-changed", &data);
@@ -5917,6 +6341,8 @@ pub fn start_ui(pending_launch: Option<crate::launch::LaunchRequest>) -> anyhow:
             get_tool_config,
             get_all_tool_configs,
             set_tool_config,
+            crate::tool_memory::read_tool_memory,
+            crate::tool_memory::write_tool_memory,
             crate::git::git_changes,
             crate::git::git_show_file,
             crate::git::git_init,

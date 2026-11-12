@@ -239,6 +239,32 @@ Delete this note whenever you're ready, and start your first task.`,
   'heatmap.tooltip_none': 'No activity on {date}',
 
 
+
+  // Markdown preview, live session state, tool memory.
+  'claude.scroll_latest': 'Back to latest',
+  'diff.view.diff': 'Diff',
+  'diff.view.preview': 'Preview',
+  'menu.preview_markdown': 'Preview Markdown',
+  'preview.badge': 'Markdown',
+  'preview.close': 'Close preview',
+  'preview.empty': 'File is empty',
+  'preview.error': 'Failed to read file: {msg}',
+  'preview.loading': 'Loading file…',
+  'preview.reload': 'Reload file',
+  'preview.rendered': 'Preview',
+  'preview.source': 'Source',
+  'preview.tab': 'Preview',
+  'session.needs_attention': 'Waiting for you',
+  'session.working': 'Working',
+  'task.filter_all_tools': 'All tools',
+  'tool_config.save_failed': 'Failed to save configuration',
+  'tools.memory.read_error': 'Failed to read the file',
+  'tools.memory.reload': 'Reload from disk',
+  'tools.memory.saved': 'Saved',
+  'tools.memory.unsaved': 'Unsaved changes',
+  'tools.memory.write_error': 'Failed to save the file',
+  'tools.tab.memory': 'Global Memory',
+  'tools.title': 'CLI Tools & Global Memory',
 } as const;
 
 export type I18nKey = keyof typeof en;

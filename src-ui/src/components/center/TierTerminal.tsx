@@ -42,6 +42,7 @@ import { createTerminalSizeSync, DEFAULT_TERMINAL_GRID } from '../../lib/termina
 import { UI_SCALE_CHANGED } from '../../lib/ui-scale';
 import { clearWebglDrawingBuffers } from '../../lib/terminal-ghost';
 import { IS_WINDOWS } from '../../lib/platform';
+import { createTerminalEnterEncoder } from '../../lib/terminal-enter';
 import { commands } from '../../tauri';
 import { confirmTerminalAgentStatus, forwardTerminalInput, isTerminalSubmitInput, registerTerminalControl, setTerminalControlReady, submitTerminalPrompt, terminalControlStatus } from '../../lib/terminal-control';
 import { supportsAgentStatus, useAppDispatch, useAppStateRef, type AgentStatus, type ToolType, type ThemeColor } from '../../store/app-state';
@@ -473,6 +474,7 @@ function TierTerminalImpl({
   // (pre-paint, via useLayoutEffect) so the solid terminal background shows
   // through instead, then unmask once xterm paints its first fresh frame.
   const [canvasHidden, setCanvasHidden] = useState(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
   // ── Terminal context menu ────────────────────────────────────────────────
   const [ctxMenu, setCtxMenu] = useState<TermContextMenuState | null>(null);
@@ -1081,6 +1083,8 @@ function TierTerminalImpl({
     // documented; pin against this xterm version on upgrade.
 
     // Handle native Copy/Paste shortcuts
+    const enterEncoder = createTerminalEnterEncoder(term, tool);
+    unlisteners.push(() => enterEncoder.dispose());
     term.attachCustomKeyEventHandler((e) => {
       // macOS IME bookkeeping (issues #107, #128) — mirror xterm's
       // `_keyDownSeen` / `_keyPressHandled` and record the Chromium-style 229
@@ -1114,6 +1118,15 @@ function TierTerminalImpl({
         }
         const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
         const cmdOrCtrl = isMac ? e.metaKey : e.ctrlKey;
+
+        // Modified Enter (Shift+Enter / Ctrl+Enter / Alt+Enter) → multiline newline
+        // inside AI CLI prompts (Claude Code, Codex, OpenCode, Pi, OMP, etc.).
+        const modifiedEnter = enterEncoder.encode(e);
+        if (modifiedEnter) {
+          e.preventDefault();
+          forwardInput(modifiedEnter);
+          return false;
+        }
 
         // Copy: Ctrl+C / Cmd+C — only when text is selected (otherwise send SIGINT).
         if (cmdOrCtrl && e.code === 'KeyC') {
@@ -1561,6 +1574,18 @@ function TierTerminalImpl({
       // Cursor move tracking removed - no longer needed
     });
 
+    const syncScrollButton = () => {
+      const buf = term.buffer.active;
+      const isScrolledUp = buf.type === 'normal' && buf.baseY - buf.viewportY > 2;
+      setShowScrollToBottom(prev => prev === isScrolledUp ? prev : isScrolledUp);
+    };
+    const scrollDisposable = term.onScroll(syncScrollButton);
+    const writeParsedDisposable = term.onWriteParsed(syncScrollButton);
+    unlisteners.push(() => {
+      scrollDisposable.dispose();
+      writeParsedDisposable.dispose();
+    });
+
     // Auto-focus so keyboard input works immediately
     term.focus();
 
@@ -1734,6 +1759,10 @@ function TierTerminalImpl({
           if (!mounted) return;
           dispatch({ type: 'SET_TERMINAL_CWD', id: sessionId, path: cwd });
         },
+        onToken: (token) => {
+          if (!mounted || !token) return;
+          dispatch({ type: 'SET_TERMINAL_RESUME_TOKEN', id: sessionId, resumeToken: token });
+        },
       });
       if (mounted) unlisteners.push(unsubEvents); else { unsubEvents(); return; }
 
@@ -1753,6 +1782,11 @@ function TierTerminalImpl({
           await commands.tierTerminalStart(sessionId, tool, initialGrid.size.cols, initialGrid.size.rows, theme, lang, toolData, folderPath ?? undefined, resumeToken, appStateRef.current.defaultShell);
           if (mounted && !ptyEnded) setTerminalControlReady(sessionId, true);
           sizeSync.markPtyStarted();
+          commands.getTerminalSessionToken(sessionId).then((token) => {
+            if (mounted && token) {
+              dispatch({ type: 'SET_TERMINAL_RESUME_TOKEN', id: sessionId, resumeToken: token });
+            }
+          }).catch(() => {});
         } catch (err) {
           // Resume / launch validation failures (missing cwd, bad token
           // format, binary not on PATH) land here. The upstream CLI's own
@@ -2446,11 +2480,38 @@ function TierTerminalImpl({
             }
           }
 
-          // If no image found, let the event propagate to xterm for normal text paste
+          // If no image found in WebView2 clipboardData, check if plain text is absent
+          // and fall back to the native OS clipboard image reader (fixes Snipping Tool / PrintScreen).
+          const plainText = e.clipboardData?.getData('text/plain') ?? '';
+          if (!plainText) {
+            e.preventDefault();
+            const nativePath = await clipboardReadImage();
+            if (nativePath) {
+              xtermRef.current?.paste(nativePath);
+            }
+          }
         }}
       >
         <div ref={termRef} className={`tier-xterm${selfRenderedCaret ? ' self-rendered-caret' : ''}`} />
       </div>
+
+      {showScrollToBottom && (
+        <button
+          type="button"
+          className="terminal-scroll-latest-btn"
+          onClick={() => {
+            xtermRef.current?.scrollToBottom();
+            setShowScrollToBottom(false);
+          }}
+          title={t('claude.scroll_latest')}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M12 5v14" />
+            <path d="m19 12-7 7-7-7" />
+          </svg>
+          <span>{t('claude.scroll_latest')}</span>
+        </button>
+      )}
 
       {/* Terminal right-click context menu */}
       {ctxMenu && (

@@ -279,6 +279,10 @@ export interface AppState {
   /// switch back to, without diffMode flipping (mode = which surface the diff
   /// renders on; this = which tab is focused right now).
   diffTabActive: boolean;
+
+  // ── Markdown preview center tab ────────────────────────────────────────
+  previewSelection: string | null;
+  previewTabActive: boolean;
 }
 
 /// Snapshot of the file the user clicked in ChangesBoard, plus the folderPath
@@ -378,10 +382,14 @@ type Action =
   | { type: 'SET_MULTI_AGENT_LAYOUT'; layout: 'grid' | 'columns' }
   | { type: 'SET_TASK_VIEW_MODE'; mode: 'list' | 'note' | 'prompt' }
   | { type: 'SET_TAB_TITLE'; id: string; title: string }
+  | { type: 'SET_TERMINAL_RESUME_TOKEN'; id: string; resumeToken?: string }
   | { type: 'SET_DIFF_SELECTION'; selection: DiffSelection }
   | { type: 'CLEAR_DIFF' }
   | { type: 'SET_DIFF_MODE'; mode: 'overlay' | 'tab' }
-  | { type: 'SET_DIFF_TAB_ACTIVE'; active: boolean };
+  | { type: 'SET_DIFF_TAB_ACTIVE'; active: boolean }
+  | { type: 'OPEN_PREVIEW'; path: string }
+  | { type: 'SET_PREVIEW_TAB_ACTIVE'; active: boolean }
+  | { type: 'CLOSE_PREVIEW_TAB' };
 
 // ─── Reducer ─────────────────────────────────────────────────────────────────
 
@@ -459,6 +467,7 @@ function reducer(state: AppState, action: Action): AppState {
         tabOrder: [...getTabOrder(state), session.id],
         activeTerminalId: session.id,
         diffTabActive: false,
+        previewTabActive: false,
       };
     }
     case 'LAUNCH_TERMINAL_TOOL': {
@@ -476,7 +485,7 @@ function reducer(state: AppState, action: Action): AppState {
         ...state,
         terminals: previous ? state.terminals.map(tab => tab.id === action.id ? session : tab) : [...state.terminals, session],
         tabOrder: previous ? state.tabOrder : [...getTabOrder(state), action.id],
-        activeTerminalId: action.id, diffTabActive: false,
+        activeTerminalId: action.id, diffTabActive: false, previewTabActive: false,
       };
     }
     case 'REMOVE_TERMINAL': {
@@ -514,7 +523,16 @@ function reducer(state: AppState, action: Action): AppState {
       // Activating a terminal tab blurs the diff tab (they're peer tabs in
       // the strip; only one is focused at a time). diffMode is untouched —
       // the diff still renders in its chosen surface, just not focused.
-      return { ...state, activeTerminalId: action.id, diffTabActive: false };
+      return { ...state, activeTerminalId: action.id, diffTabActive: false, previewTabActive: false };
+    case 'SET_TERMINAL_RESUME_TOKEN': {
+      let changed = false;
+      const terminals = state.terminals.map(t => {
+        if (t.id !== action.id || t.resumeToken === action.resumeToken) return t;
+        changed = true;
+        return { ...t, resumeToken: action.resumeToken };
+      });
+      return changed ? { ...state, terminals } : state;
+    }
     case 'SET_TERMINAL_TOOL':
       return {
         ...state,
@@ -698,6 +716,7 @@ function reducer(state: AppState, action: Action): AppState {
         ...state,
         diffSelection: action.selection,
         diffTabActive: state.diffMode === 'tab' ? true : state.diffTabActive,
+        previewTabActive: state.diffMode === 'tab' ? false : state.previewTabActive,
       };
     case 'CLEAR_DIFF':
       // Dropping the selection also folds the diff tab: a tab only renders
@@ -708,10 +727,38 @@ function reducer(state: AppState, action: Action): AppState {
       try { localStorage.setItem('cc-diff-mode', action.mode); } catch { /* Best-effort operation; failure is non-fatal. */ }
       // Entering tab mode focuses the diff tab; leaving blurs it. Keeps the
       // active-surface tracking in lockstep with the surface the diff is on.
-      return { ...state, diffMode: action.mode, diffTabActive: action.mode === 'tab' };
+      return {
+        ...state,
+        diffMode: action.mode,
+        diffTabActive: action.mode === 'tab',
+        previewTabActive: action.mode === 'tab' ? false : state.previewTabActive,
+      };
     }
     case 'SET_DIFF_TAB_ACTIVE':
-      return { ...state, diffTabActive: action.active };
+      return {
+        ...state,
+        diffTabActive: action.active,
+        previewTabActive: action.active ? false : state.previewTabActive,
+      };
+    case 'OPEN_PREVIEW':
+      return {
+        ...state,
+        previewSelection: action.path,
+        previewTabActive: true,
+        diffTabActive: false,
+      };
+    case 'SET_PREVIEW_TAB_ACTIVE':
+      return {
+        ...state,
+        previewTabActive: action.active,
+        diffTabActive: action.active ? false : state.diffTabActive,
+      };
+    case 'CLOSE_PREVIEW_TAB':
+      return {
+        ...state,
+        previewSelection: null,
+        previewTabActive: false,
+      };
     default:
       return state;
   }
@@ -944,6 +991,8 @@ function getInitialState(): AppState {
     diffSelection: null,
     diffMode,
     diffTabActive: false,
+    previewSelection: null,
+    previewTabActive: false,
     tabOrder: [defaultTerminalId],
   };
 }

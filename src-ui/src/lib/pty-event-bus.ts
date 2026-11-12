@@ -25,6 +25,7 @@ interface OutputEventPayload { id: string; data: string; at_ms?: number; }
 interface StatusEventPayload { id: string; running: boolean; exit_code: number | null; }
 interface CwdEventPayload { id: string; cwd: string; }
 interface ExitEventPayload { id: string; exit_code: number; }
+interface TokenEventPayload { id: string; session_token: string; }
 
 /** `atMs` is the wall-clock millis stamped by the Rust emitter, for timing
  *  the delivery leg. Absent when the backend predates the field. */
@@ -32,6 +33,7 @@ type OutputHandler = (data: string, atMs?: number) => void;
 type StatusHandler = (running: boolean, exitCode: number | null) => void;
 type CwdHandler = (cwd: string) => void;
 type ExitHandler = (exitCode: number) => void;
+type TokenHandler = (sessionToken: string) => void;
 
 interface TerminalEventHandlers {
   onOutput?: OutputHandler;
@@ -42,12 +44,15 @@ interface TerminalEventHandlers {
    *  after the reader thread sees EOF — onExit may arrive earlier, and with
    *  the real exit code instead of the hardcoded 0 in the status event. */
   onExit?: ExitHandler;
+  /** Fires when the backend resolves a newly launched CLI's resume token on disk. */
+  onToken?: TokenHandler;
 }
 
 const outputHandlers = new Map<string, Set<OutputHandler>>();
 const statusHandlers = new Map<string, Set<StatusHandler>>();
 const cwdHandlers = new Map<string, Set<CwdHandler>>();
 const exitHandlers = new Map<string, Set<ExitHandler>>();
+const tokenHandlers = new Map<string, Set<TokenHandler>>();
 
 let globalUnlisteners: UnlistenFn[] | null = null;
 let initPromise: Promise<void> | null = null;
@@ -70,6 +75,9 @@ async function ensureInit(): Promise<void> {
       }));
       registered.push(await listen<ExitEventPayload>('tier-terminal-exit', (event) => {
         exitHandlers.get(event.payload.id)?.forEach(handler => handler(event.payload.exit_code));
+      }));
+      registered.push(await listen<TokenEventPayload>('tier-terminal-token', (event) => {
+        tokenHandlers.get(event.payload.id)?.forEach(handler => handler(event.payload.session_token));
       }));
       globalUnlisteners = registered;
     } catch (error) {
@@ -109,6 +117,7 @@ export async function subscribeTerminalEvents(
   const myStatus = handlers.onStatus;
   const myCwd = handlers.onCwd;
   const myExit = handlers.onExit;
+  const myToken = handlers.onToken;
 
   const add = <T,>(map: Map<string, Set<T>>, handler: T | undefined) => {
     if (!handler) return;
@@ -123,6 +132,7 @@ export async function subscribeTerminalEvents(
   add(statusHandlers, myStatus);
   add(cwdHandlers, myCwd);
   add(exitHandlers, myExit);
+  add(tokenHandlers, myToken);
 
   return () => {
     const remove = <T,>(map: Map<string, Set<T>>, handler: T | undefined) => {
@@ -136,5 +146,6 @@ export async function subscribeTerminalEvents(
     remove(statusHandlers, myStatus);
     remove(cwdHandlers, myCwd);
     remove(exitHandlers, myExit);
+    remove(tokenHandlers, myToken);
   };
 }

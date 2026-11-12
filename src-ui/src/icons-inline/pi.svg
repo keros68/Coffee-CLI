@@ -1,7 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- Official Pi mark from https://pi.dev/logo-auto.svg. -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="165.29 165.29 469.43 469.43" width="100%" height="100%">
-  <path fill="#F09082" d="M165.29 165.29H517.36V400H400V282.65H165.29Z"/>
-  <path fill="#4D9ABF" d="M165.29 282.65H282.65V400H400V517.36H282.65V634.72H165.29Z"/>
-  <path fill="#F1BE58" d="M517.36 400H634.72V634.72H517.36Z"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="165.447 165.447 469.106 469.106" width="100%" height="100%" fill="none">
+  <path fill="currentColor" fill-rule="evenodd" d="M165.447 165.447H399.566V294.798H294.798V505.202H400.434V399.566H505.202V294.798H634.553V634.553H165.447V165.447Z" clip-rule="evenodd"/>
+  <path fill="currentColor" d="M505.202 294.798H399.566V400.434H505.202V294.798Z"/>
 </svg>

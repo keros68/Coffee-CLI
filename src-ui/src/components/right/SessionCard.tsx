@@ -15,6 +15,11 @@ export function SessionCard({
   hideLabel,
   isRenaming,
   renameValue,
+  isWorking,
+  needsAttention,
+  isActive,
+  attentionLabel,
+  workingLabel,
   onOpen,
   onContextMenu,
   onRenameChange,
@@ -29,6 +34,11 @@ export function SessionCard({
   hideLabel: string;
   isRenaming: boolean;
   renameValue: string;
+  isWorking?: boolean;
+  needsAttention?: boolean;
+  isActive?: boolean;
+  attentionLabel?: string;
+  workingLabel?: string;
   onOpen: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
   onRenameChange: (value: string) => void;
@@ -39,7 +49,11 @@ export function SessionCard({
   onHide: () => void;
 }) {
   return (
-    <div className="history-card" onClick={onOpen} onContextMenu={onContextMenu}>
+    <div
+      className={`history-card${isWorking ? ' history-card-working' : ''}${needsAttention ? ' history-card-needs-attention' : ''}${isActive ? ' history-card-active' : ''}`}
+      onClick={onOpen}
+      onContextMenu={onContextMenu}
+    >
       <div className="history-card-content">
         <div className="history-card-title-row">
           <span className="history-card-icon">{toolIcon}</span>
@@ -67,6 +81,15 @@ export function SessionCard({
           ) : (
             <>
               <span className="history-card-title">{displayName}</span>
+              {needsAttention ? (
+                <span className="history-card-attention-indicator" role="img" aria-label={attentionLabel}>
+                  {attentionLabel}
+                </span>
+              ) : isWorking ? (
+                <span className="history-card-working-indicator" role="img" aria-label={workingLabel}>
+                  <span />
+                </span>
+              ) : null}
               {/* One-click soft-delete (hide), revealed in the title row.
                   stopPropagation keeps it from resuming the session. */}
               <button

@@ -233,4 +233,30 @@ export const ru = {
   'heatmap.tooltip_none': '{date} · нет активности',
 
 
+
+  // Markdown preview, live session state, tool memory.
+  'claude.scroll_latest': 'К последнему',
+  'diff.view.diff': 'Дифф',
+  'diff.view.preview': 'Просмотр',
+  'menu.preview_markdown': 'Предпросмотр Markdown',
+  'preview.badge': 'Markdown',
+  'preview.close': 'Закрыть предпросмотр',
+  'preview.empty': 'Файл пуст',
+  'preview.error': 'Ошибка чтения файла: {msg}',
+  'preview.loading': 'Загрузка файла…',
+  'preview.reload': 'Перезагрузить файл',
+  'preview.rendered': 'Просмотр',
+  'preview.source': 'Исходник',
+  'preview.tab': 'Просмотр',
+  'session.needs_attention': 'Ожидает вас',
+  'session.working': 'В работе',
+  'task.filter_all_tools': 'Все инструменты',
+  'tool_config.save_failed': 'Не удалось сохранить конфигурацию',
+  'tools.memory.read_error': 'Не удалось прочитать файл',
+  'tools.memory.reload': 'Перезагрузить с диска',
+  'tools.memory.saved': 'Сохранено',
+  'tools.memory.unsaved': 'Несохранённые изменения',
+  'tools.memory.write_error': 'Не удалось сохранить файл',
+  'tools.tab.memory': 'Глобальная память',
+  'tools.title': 'CLI-инструменты и глобальная память',
 } as const satisfies Record<I18nKey, string>;

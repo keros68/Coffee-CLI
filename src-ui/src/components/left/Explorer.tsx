@@ -10,6 +10,7 @@ import { ScrollPanel } from '../common/ScrollPanel';
 import { clipboardWrite } from '../../lib/clipboard';
 import { beginExplorerDrag } from '../../lib/explorer-drag';
 import { useFileStats, useDirtyDirs } from '../../lib/git-status';
+import { isMarkdownFilePath } from '../../lib/file-types';
 import { refreshHistory } from '../../lib/history-cache';
 import { commands, onSelfUpdateProgress } from '../../tauri';
 import type { DirEntryInfo } from '../../tauri';
@@ -53,7 +54,14 @@ function dispatchFsRefresh(dirPath: string) {
 
 export function ContextMenu({ menu, onClose }: { menu: CtxMenuState; onClose: () => void }) {
   const t = useT();
+  const { dispatch } = useAppState();
   const menuRef = useRef<HTMLDivElement>(null);
+  const canPreviewMarkdown = !menu.isDir && isMarkdownFilePath(menu.absolutePath);
+
+  const handlePreviewMarkdown = () => {
+    onClose();
+    dispatch({ type: 'OPEN_PREVIEW', path: menu.absolutePath });
+  };
 
   useEffect(() => {
     const close = (e: MouseEvent) => {
@@ -165,6 +173,15 @@ export function ContextMenu({ menu, onClose }: { menu: CtxMenuState; onClose: ()
 
   return createPortal(
     <div className="ctx-menu" ref={menuRef} style={style}>
+      {canPreviewMarkdown && (
+        <button className="ctx-menu-item" onClick={handlePreviewMarkdown}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+          {t('menu.preview_markdown')}
+        </button>
+      )}
       {/* Primary action: open in OS default — most-used, sits at the top */}
       <button className="ctx-menu-item" onClick={handleOpen}>
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -465,12 +482,13 @@ function BrowserFileNode({ entry, parentDirPath, onCtxMenu }: {
   parentDirPath: string;
   onCtxMenu: (menu: CtxMenuState) => void;
 }) {
-  const { state: { iconTheme } } = useAppState();
+  const { state: { iconTheme }, dispatch } = useAppState();
   const fileStats = useFileStats();
   const stats = fileStats?.get(normPath(entry.path));
   const [renaming, setRenaming] = useState(false);
   const [renameVal, setRenameVal] = useState(entry.name);
   const renameInputRef = useRef<HTMLInputElement>(null);
+  const isMarkdown = isMarkdownFilePath(entry.path);
 
   useEffect(() => { if (renaming) renameInputRef.current?.select(); }, [renaming]);
 
@@ -508,6 +526,11 @@ function BrowserFileNode({ entry, parentDirPath, onCtxMenu }: {
       className={`tree-file ${renaming ? 'renaming' : ''}`}
       onContextMenu={handleCtxMenu}
       onMouseDown={onFileMouseDown}
+      onClick={() => {
+        if (!renaming && isMarkdown) {
+          dispatch({ type: 'OPEN_PREVIEW', path: entry.path });
+        }
+      }}
     >
       <span className="tree-icon">
         <ThemedIcon
@@ -737,44 +760,6 @@ export function Explorer() {
       {/* Brand + theme/lang controls */}
       {brandSlot && createPortal(
         <div className="brand">
-          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" className="brand-icon">
-            <defs>
-              <mask id="brandIconMask">
-                {/* Steam (3 wavy lines). The `<animate>` is gated to non-Linux
-                    because WebKit2GTK has no GPU path for SMIL `path d` morphing
-                    inside a `<mask>`: every frame re-evaluates the bezier
-                    geometry, re-rasters the mask, and re-composites the masked
-                    full-viewport path on line ~1108. With the mask applied
-                    over the entire 24×24 brand icon and the indefinite loop
-                    running idle, the kompositor → IPC ack chain pegs Linux
-                    WebKitWebProcess + coffee-cli at ~1.2 cores combined even
-                    when nothing else is on screen (verified live: SSH 5s
-                    increments dropped from 37%/89% to ~0% the moment WebKit
-                    was killed; same coffee-cli on Windows WebView2 / macOS
-                    WKWebView is silent because both have hardware-accelerated
-                    SMIL). Static `d` on Linux means the steam stops drifting
-                    upward but the cup glyph itself is fully intact. */}
-                <path fill="none" stroke="#fff" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M12 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M16 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4">
-                  {!__IS_LINUX__ && (
-                    <animate attributeName="d" dur="3s" repeatCount="indefinite" values="M8 0c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M12 0c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M16 0c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4;M8 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M12 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M16 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4"/>
-                  )}
-                </path>
-                <path d="M4 7h16v0h-16v12h16v-32h-16Z">
-                  <animate fill="freeze" attributeName="d" begin="1s" dur="0.6s" to="M4 2h16v5h-16v12h16v-24h-16Z"/>
-                </path>
-              </mask>
-            </defs>
-            <g stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2">
-              <path fill="currentColor" fillOpacity="0" strokeDasharray="48" d="M17 9v9c0 1.66 -1.34 3 -3 3h-6c-1.66 0 -3 -1.34 -3 -3v-9Z">
-                <animate fill="freeze" attributeName="stroke-dashoffset" dur="0.6s" values="48;0"/>
-                <animate fill="freeze" attributeName="fill-opacity" begin="1.6s" dur="0.4s" to="1"/>
-              </path>
-              <path fill="none" strokeDasharray="16" strokeDashoffset="16" d="M17 9h3c0.55 0 1 0.45 1 1v3c0 0.55 -0.45 1 -1 1h-3">
-                <animate fill="freeze" attributeName="stroke-dashoffset" begin="0.6s" dur="0.3s" to="0"/>
-              </path>
-            </g>
-            <path fill="currentColor" d="M0 0h24v24H0z" mask="url(#brandIconMask)"/>
-          </svg>
           <span>{t('app.title')}</span>
           {hasUpdate && (
             <button

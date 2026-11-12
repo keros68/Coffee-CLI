@@ -238,4 +238,30 @@ export const zhCN = {
   'heatmap.tooltip_none': '{date} · 没有活动',
 
 
+
+  // Markdown preview, live session state, tool memory.
+  'claude.scroll_latest': '回到最新',
+  'diff.view.diff': '差异',
+  'diff.view.preview': '预览',
+  'menu.preview_markdown': '预览 Markdown',
+  'preview.badge': 'Markdown',
+  'preview.close': '关闭预览',
+  'preview.empty': '文件为空',
+  'preview.error': '读取文件失败：{msg}',
+  'preview.loading': '正在读取文件…',
+  'preview.reload': '重新加载',
+  'preview.rendered': '渲染预览',
+  'preview.source': '源码',
+  'preview.tab': '预览',
+  'session.needs_attention': '等待处理',
+  'session.working': '正在运行',
+  'task.filter_all_tools': '全部工具',
+  'tool_config.save_failed': '保存配置失败',
+  'tools.memory.read_error': '读取文件失败',
+  'tools.memory.reload': '从磁盘重新加载',
+  'tools.memory.saved': '已保存',
+  'tools.memory.unsaved': '未保存的修改',
+  'tools.memory.write_error': '保存文件失败',
+  'tools.tab.memory': '全局记忆',
+  'tools.title': 'CLI 工具与全局记忆',
 } as const satisfies Record<I18nKey, string>;

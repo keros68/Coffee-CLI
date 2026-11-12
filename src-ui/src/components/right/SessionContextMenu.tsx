@@ -47,7 +47,17 @@ const ICON_PROPS = {
   strokeLinejoin: 'round' as const,
 };
 
-export function SessionContextMenu({ menu, onClose, onRename }: { menu: SessionCtxMenuState; onClose: () => void; onRename: (session: SavedSession) => void }) {
+export function SessionContextMenu({
+  menu,
+  onClose,
+  onRename,
+  onDelete,
+}: {
+  menu: SessionCtxMenuState;
+  onClose: () => void;
+  onRename: (session: SavedSession) => void;
+  onDelete?: (session: SavedSession) => void;
+}) {
   const t = useT();
   const menuRef = useRef<HTMLDivElement>(null);
   const { session } = menu;
@@ -112,7 +122,14 @@ export function SessionContextMenu({ menu, onClose, onRename }: { menu: SessionC
     if (autoNamed) optOutAutoName(session.tool ?? '', session.id);
     onClose();
   };
-  const handleDelete = () => { hideSession(session.tool ?? '', session.id); onClose(); };
+  const handleDelete = () => {
+    if (onDelete) {
+      onDelete(session);
+    } else {
+      hideSession(session.tool ?? '', session.id);
+    }
+    onClose();
+  };
   const handleShowInFolder = async () => {
     onClose();
     if (!filePath) return;

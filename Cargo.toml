@@ -59,6 +59,7 @@ base64 = "0.22.1"
 # to PNG before writing the temp file the AI CLI references by path. Reuses
 # the same png 0.17.x already pulled in transitively by tauri, no extra build.
 png = "0.17"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 # In-app self-update downloader (Windows). Blocking + rustls, runs on a
 # spawn_blocking thread; streams the installer so we can emit download %.
 ureq = "2"
@@ -108,12 +109,16 @@ keyring = { version = "3", features = ["windows-native"] }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     "Win32_Security",
     "Win32_System_Console",
+    "Win32_System_DataExchange",
     "Win32_System_JobObjects",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
     "Win32_System_Registry",
     "Win32_System_Threading",
 ] }

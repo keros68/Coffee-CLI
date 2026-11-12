@@ -41,9 +41,10 @@ const autoStore = load('../src/lib/auto-named-sessions.ts', {}, `({
 const renamedStore = load('../src/lib/renamed-sessions.ts', {}, `({
   setCustomName, getCustomName, getRenamedSnapshot,
 })`);
-const groups = load('../src/lib/session-groups.ts', {}, '({ projectLabel, stripProjectPrefix })');
+const groups = load('../src/lib/session-groups.ts', {}, '({ projectLabel, stripProjectPrefix, ensureProjectPrefix })');
 const autoname = load('../src/lib/session-autoname.ts', {
   isTauri: true,
+  projectLabel: groups.projectLabel,
   savedAtMs: value => Date.parse(value),
   getHistorySnapshot: () => ({ sessions: [], status: 'ready' }),
   subscribeHistory: () => () => {},
@@ -120,9 +121,9 @@ assert.equal(groups.projectLabel(session('x', '~', 'hermes')), null, 'hermes has
 assert.equal(groups.projectLabel(session('x', `C:${BS}`)), null, 'a drive root is not a project name');
 assert.equal(groups.projectLabel(session('x', '~/.openclaw/workspace', 'openclaw')), null);
 assert.equal(groups.projectLabel(session('x', 'D:\\work\\pi-opencode-go.alibaba')), 'pi-opencode-go.a', 'labels cut at 16 characters');
-// The meta line names the project, so auto names carry only the goal.
-assert.equal(autoname.buildAutoName(session('修一下侧栏会话命名', 'D:\\work\\coffeecli')), '修一下侧栏会话命名');
-assert.equal(autoname.buildAutoName(session('fix the sidebar', '/home/dev/tools')), 'fix the sidebar');
+assert.equal(autoname.buildAutoName(session('修一下侧栏会话命名', 'D:\\work\\coffeecli')), 'coffeecli｜修一下侧栏会话命名');
+assert.equal(autoname.buildAutoName(session('fix the sidebar', '/home/dev/tools')), 'tools | fix the sidebar');
+assert.equal(autoname.buildAutoName(session('coffeecli 会话列表分区', 'D:\\work\\coffeecli')), 'coffeecli 会话列表分区');
 // Titles that start with the project — old auto names, agents' own 模块｜目标.
 const strip = (title, cwd, tool) => groups.stripProjectPrefix(title, session('x', cwd, tool));
 assert.equal(strip('aicross｜统一 README', 'D:\\work\\aicross'), '统一 README');
@@ -149,7 +150,7 @@ const rows = [
 renamedStore.setCustomName('claude', 'd', '手动标题');
 
 assert.equal(autoname.runAutoNamePass(rows, NOW), 2, 'names the settled rows only');
-assert.equal(autoStore.getAutoName('claude', 'a'), '修一下侧栏会话命名');
+assert.equal(autoStore.getAutoName('claude', 'a'), 'coffeecli｜修一下侧栏会话命名');
 assert.equal(autoStore.getAutoName('codex', 'b'), undefined, 'a session mid-turn is left alone');
 assert.equal(autoStore.getAutoName('claude', 'd'), undefined, 'a manual rename wins over the generated name');
 
@@ -169,7 +170,7 @@ assert.equal(autoname.runAutoNamePass([session('新的任务', 'D:\\work\\coffee
 assert.equal(autoStore.getAutoName('claude', 'e'), undefined);
 autoname.setAutoNameEnabled(true);
 assert.equal(autoname.runAutoNamePass([session('新的任务', 'D:\\work\\coffeecli', 'claude', { id: 'e', ...stale })], NOW), 1);
-assert.equal(autoStore.getAutoName('claude', 'e'), '新的任务');
+assert.equal(autoStore.getAutoName('claude', 'e'), 'coffeecli｜新的任务');
 
 // Bulk write emits once for the whole pass, not once per session.
 let emits = 0;
@@ -187,7 +188,7 @@ const coverage = ['claude', 'codex', 'pi', 'kimicode'].map(tool =>
   session('修复会话列表刷新', 'D:\\work\\coffeecli', tool, { id: `cover-${tool}`, ...stale }));
 assert.equal(autoname.runAutoNamePass(coverage, NOW), 4, 'every tool is named, not only the first one');
 for (const row of coverage) {
-  assert.equal(autoStore.getAutoName(row.tool, row.id), '修复会话列表刷新', row.tool);
+  assert.equal(autoStore.getAutoName(row.tool, row.id), 'coffeecli｜修复会话列表刷新', row.tool);
 }
 
 console.log('session-autoname: all assertions passed');

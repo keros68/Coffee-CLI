@@ -2564,3 +2564,97 @@ html.is-windows[data-frost="frost"] #root {
 :is([data-shape="carbon"], [data-shape="monogram"])[data-mode="light"] .agent-session-search:focus {
     background: color-mix(in oklab, #fffdf9 80%, transparent);
 }
+
+/* ── ToolConfigModal global memory tab ────────────────────────────────── */
+.tool-config-modal--wide {
+    width: min(560px, 92vw);
+}
+
+.tool-config-tabs {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    background: var(--bg-surface);
+    margin-left: auto;
+    margin-right: 8px;
+}
+
+.tool-config-tab {
+    padding: 4px 10px;
+    border-radius: 5px;
+    border: none;
+    background: transparent;
+    color: var(--text-3);
+    font-size: 11.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: color 0.14s ease, background 0.14s ease;
+}
+
+.tool-config-tab:hover {
+    color: var(--text-1);
+}
+
+.tool-config-tab.active {
+    color: var(--text-1);
+    background: var(--bg-elev);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+.tool-config-memory-body {
+    gap: 10px;
+}
+
+.tool-config-memory-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.tool-config-memory-path {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono, monospace);
+    font-size: 11px;
+    color: var(--text-3);
+    padding: 4px 8px;
+    border-radius: 5px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+}
+
+.tool-config-memory-status {
+    font-size: 11px;
+    color: var(--text-3);
+    flex-shrink: 0;
+}
+
+.tool-config-memory-editor {
+    font-family: var(--font-mono, monospace);
+    font-size: 12.5px;
+    line-height: 1.55;
+    resize: vertical;
+    min-height: 240px;
+}
+
+.tool-config-btn-sm {
+    padding: 4px 8px;
+    font-size: 11px;
+}
+
+.tool-config-error {
+    font-size: 12px;
+    color: #ef4444;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: 1px solid rgba(239, 68, 68, 0.35);
+    background: rgba(239, 68, 68, 0.08);
+}
+

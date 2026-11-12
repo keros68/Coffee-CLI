@@ -235,6 +235,12 @@ pub struct TerminalExitEvent {
     pub exit_code: i32,
 }
 
+#[derive(Serialize, Clone)]
+pub struct SessionTokenPayload {
+    pub id: String,
+    pub token: String,
+}
+
 // ─── Agent Presets for Session Resume ─────────────────────
 
 pub struct AgentPreset {
@@ -1227,6 +1233,54 @@ fn resolve_program(name: &str) -> String {
     name.to_string()
 }
 
+pub fn prepare_pi_launch(mut args: Vec<String>) -> (Vec<String>, Option<String>) {
+    if args_specify_pi_session(&args) {
+        return (args, None);
+    }
+    let session_id = uuid::Uuid::new_v4().to_string();
+    args.push("--session".to_string());
+    args.push(session_id.clone());
+    (args, Some(session_id))
+}
+
+fn args_specify_pi_session(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--session" | "--resume" | "-r" | "--continue" | "-c" | "--no-session"
+        ) || arg.starts_with("--session=")
+    })
+}
+
+pub fn find_pi_session_file_by_id(session_id: &str) -> Option<std::path::PathBuf> {
+    let sessions_dir = dirs::home_dir()?.join(".pi").join("agent").join("sessions");
+    find_pi_session_file_in(&sessions_dir, session_id)
+}
+
+fn find_pi_session_file_in(
+    sessions_dir: &std::path::Path,
+    session_id: &str,
+) -> Option<std::path::PathBuf> {
+    let suffix = format!("_{session_id}.jsonl");
+    for project_entry in std::fs::read_dir(sessions_dir).ok()?.flatten() {
+        let project_path = project_entry.path();
+        if !project_path.is_dir() {
+            continue;
+        }
+        for file_entry in std::fs::read_dir(project_path).ok()?.flatten() {
+            let file_path = file_entry.path();
+            let matches = file_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == format!("{session_id}.jsonl") || name.ends_with(&suffix));
+            if matches && file_path.is_file() {
+                return Some(file_path);
+            }
+        }
+    }
+    None
+}
+
 // ─── Unit Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1460,5 +1514,23 @@ mod tests {
         // Disallowed chars
         assert!(!token_matches("opencode", "ses_1d3161926ffeffCy3Y6l14Ezo-"));
         assert!(!token_matches("opencode", "ses_1d3161926ffeffCy3Y6l14Ezo "));
+    }
+
+    #[test]
+    fn pi_fresh_launch_assigns_session_uuid() {
+        let (args, token) = prepare_pi_launch(Vec::new());
+        let token = token.expect("fresh Pi launch should get a session UUID");
+        assert_eq!(args, vec!["--session".to_string(), token.clone()]);
+        assert!(token_matches("pi", &token));
+    }
+
+    #[test]
+    fn pi_launch_token_respects_existing_session_flags() {
+        for flag in ["--session", "--session=existing", "--resume", "-r", "--continue", "-c", "--no-session"] {
+            let existing = vec![flag.to_string()];
+            let (args, token) = prepare_pi_launch(existing.clone());
+            assert_eq!(args, existing);
+            assert_eq!(token, None);
+        }
     }
 }

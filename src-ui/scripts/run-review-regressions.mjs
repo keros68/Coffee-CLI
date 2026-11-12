@@ -349,13 +349,15 @@ console.log('OK: actual tool-card folder selection launches the chosen tool');
   assert.deepEqual(Array.from(merged.slice(-2), session => session.id), ['native-seconds', 'native-iso']);
   const allHistories = evaluate(filter, {
     useMemo: callback => callback(), baseSessions: merged, hidden: new Set(), pinned: new Set(),
-    activeProject: null, debouncedQuery: '', renamed: {}, autoNamed: {}, autoNameOn: true,
+    activeProject: null, activeTool: null, debouncedQuery: '', renamed: {}, autoNamed: {}, autoNameOn: true,
+    runningSessionOrder: new Map(),
     projectName: () => '', getToolName: tool => tool,
   });
   assert.equal(allHistories.length, 37);
   const actions = [];
   const click = evaluate(`const click = ${handler}; click`, {
     dispatch: action => actions.push(action), crypto: { randomUUID: () => 'native-tab' },
+    state: { terminals: [] },
   });
   click({ id: 'claude-history', tool: 'claude', cwd: 'E:\\tmp', session_token: 'native-resume' });
   assert.deepEqual(actions.map(action => action.type), ['ADD_TERMINAL', 'SET_ACTIVE_TERMINAL']);

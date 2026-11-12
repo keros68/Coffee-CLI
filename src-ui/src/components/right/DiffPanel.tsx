@@ -15,6 +15,8 @@ import { diffLines } from 'diff';
 import { commands } from '../../tauri';
 import { useT } from '../../i18n/useT';
 import { useDataAttr } from '../../lib/use-data-attr';
+import { isMarkdownFilePath } from '../../lib/file-types';
+import { MarkdownPreview } from '../center/MarkdownPreview';
 import { tokenizeFile, getShikiTheme, type LineTokens } from '../../lib/shiki';
 import './DiffPanel.css';
 
@@ -130,7 +132,12 @@ export function DiffPanel({ path, repoRoot, rel, kind, commitHash, onClose, mode
   // (stable per file). Reset when the file changes so a new diff starts
   // fully folded.
   const [expandedGaps, setExpandedGaps] = useState<Set<string>>(() => new Set());
-  useEffect(() => { setExpandedGaps(new Set()); }, [path]);
+  const isMarkdown = useMemo(() => isMarkdownFilePath(path), [path]);
+  const [viewMode, setViewMode] = useState<'diff' | 'preview'>('diff');
+  useEffect(() => {
+    setExpandedGaps(new Set());
+    setViewMode('diff');
+  }, [path]);
   const toggleGap = (key: string) =>
     setExpandedGaps(prev => {
       const next = new Set(prev);
@@ -311,6 +318,28 @@ export function DiffPanel({ path, repoRoot, rel, kind, commitHash, onClose, mode
         <span className="diff-header-path">{path}</span>
       )}
       <div className="diff-header-actions">
+        {isMarkdown && (
+          <div className="diff-view-toggle" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === 'diff'}
+              className={`diff-view-toggle-btn${viewMode === 'diff' ? ' active' : ''}`}
+              onClick={() => setViewMode('diff')}
+            >
+              {t('diff.view.diff')}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === 'preview'}
+              className={`diff-view-toggle-btn${viewMode === 'preview' ? ' active' : ''}`}
+              onClick={() => setViewMode('preview')}
+            >
+              {t('diff.view.preview')}
+            </button>
+          </div>
+        )}
         {expanded ? (
           // Tab mode: fold back to the bottom-right overlay. The glyph is an
           // outer frame with a filled inner box pinned to the bottom-right —
@@ -384,51 +413,57 @@ export function DiffPanel({ path, repoRoot, rel, kind, commitHash, onClose, mode
     >
       {header}
       <div className="diff-body">
-        {result.state === 'loading' && (
-          <div className="diff-empty">{t('diff.loading') || 'Loading…'}</div>
-        )}
-        {result.state === 'error' && (
-          <div className="diff-empty">{t('diff.error') || 'Failed to load diff'}</div>
-        )}
-        {result.state === 'too_large' && (
-          <div className="diff-toolarge">
-            <div className="diff-toolarge-msg">
-              {t('diff.too_large') || 'File too large to show inline diff'}
-            </div>
-            <div className="diff-toolarge-stats">
-              <span className="diff-add">+{result.added}</span>
-              <span className="diff-del">-{result.deleted}</span>
-            </div>
-          </div>
-        )}
-        {result.state === 'ok' && result.added === 0 && result.deleted === 0 && (
-          <div className="diff-empty">{t('diff.no_changes') || 'No changes'}</div>
-        )}
-        {result.state === 'ok' && (result.added > 0 || result.deleted > 0) && (
-          <pre className="diff-pre">
-            {result.rows.map(row => {
-              if (row.type === 'line') return renderDiffLine(row.line);
-              if (expandedGaps.has(row.key)) return row.lines.map(renderDiffLine);
-              return (
-                <div
-                  key={row.key}
-                  className="diff-gap"
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => toggleGap(row.key)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      toggleGap(row.key);
-                    }
-                  }}
-                >
-                  {t('diff.unchanged_lines', { count: row.lines.length }) ||
-                    `⋯ ${row.lines.length} unchanged lines`}
+        {isMarkdown && viewMode === 'preview' ? (
+          <MarkdownPreview path={path} surface="embedded" />
+        ) : (
+          <>
+            {result.state === 'loading' && (
+              <div className="diff-empty">{t('diff.loading') || 'Loading…'}</div>
+            )}
+            {result.state === 'error' && (
+              <div className="diff-empty">{t('diff.error') || 'Failed to load diff'}</div>
+            )}
+            {result.state === 'too_large' && (
+              <div className="diff-toolarge">
+                <div className="diff-toolarge-msg">
+                  {t('diff.too_large') || 'File too large to show inline diff'}
                 </div>
-              );
-            })}
-          </pre>
+                <div className="diff-toolarge-stats">
+                  <span className="diff-add">+{result.added}</span>
+                  <span className="diff-del">-{result.deleted}</span>
+                </div>
+              </div>
+            )}
+            {result.state === 'ok' && result.added === 0 && result.deleted === 0 && (
+              <div className="diff-empty">{t('diff.no_changes') || 'No changes'}</div>
+            )}
+            {result.state === 'ok' && (result.added > 0 || result.deleted > 0) && (
+              <pre className="diff-pre">
+                {result.rows.map(row => {
+                  if (row.type === 'line') return renderDiffLine(row.line);
+                  if (expandedGaps.has(row.key)) return row.lines.map(renderDiffLine);
+                  return (
+                    <div
+                      key={row.key}
+                      className="diff-gap"
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => toggleGap(row.key)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          toggleGap(row.key);
+                        }
+                      }}
+                    >
+                      {t('diff.unchanged_lines', { count: row.lines.length }) ||
+                        `⋯ ${row.lines.length} unchanged lines`}
+                    </div>
+                  );
+                })}
+              </pre>
+            )}
+          </>
         )}
       </div>
     </div>

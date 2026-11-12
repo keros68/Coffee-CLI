@@ -228,9 +228,7 @@ export function projectLabel(session: { tool?: string | null; cwd?: string | nul
   return base && base.length > 16 ? base.slice(0, 16) : base;
 }
 
-/** Drop a leading `项目｜` / `project | ` from a title. The card's meta line
- *  already names the project, so the prefix (from older auto names or an
- *  agent's own `模块｜目标` title) would print it twice. Matches the full folder
+/** Drop a leading `项目｜` / `project | ` from a title. Matches the full folder
  *  name and the 16-character label older auto names used. */
 export function stripProjectPrefix(title: string, session: { tool?: string | null; cwd?: string | null }): string {
   const full = projectFolder(session);
@@ -242,6 +240,21 @@ export function stripProjectPrefix(title: string, session: { tool?: string | nul
     if (rest !== title.slice(project.length) && rest.trim()) return rest;
   }
   return title;
+}
+
+const CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uff00-\uffef]/;
+
+/** Ensure a title carries a `项目｜目标` or `模块｜目标` prefix when the session
+ *  belongs to a recognizable project folder. Titles that already contain `｜`
+ *  or ` | ` (e.g. from an agent's own title hook) or already start with the
+ *  project name are returned unchanged. */
+export function ensureProjectPrefix(title: string, session: { tool?: string | null; cwd?: string | null }): string {
+  if (!title) return title;
+  if (title.includes('｜') || title.includes(' | ')) return title;
+  const project = projectLabel(session);
+  if (!project || title.toLowerCase().startsWith(project.toLowerCase())) return title;
+  const separator = CJK_RE.test(project) || CJK_RE.test(title) ? '｜' : ' | ';
+  return `${project}${separator}${title}`;
 }
 
 /** Bucket id of the "not in any section" remainder. Never a real group id. */

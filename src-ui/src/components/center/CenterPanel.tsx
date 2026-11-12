@@ -9,6 +9,7 @@ import { ToolConfigModal } from './ToolConfigModal';
 import { ContributionHeatmap } from './ContributionHeatmap';
 import { ErrorBoundary } from '../common/ErrorBoundary';
 import { DiffPanel } from '../right/DiffPanel';
+import { MarkdownPreview } from './MarkdownPreview';
 import { getTabOrder, supportsAgentStatus, useAppState, type ToolType } from '../../store/app-state';
 import { isFrostShape } from '../../lib/personalization';
 import { supportsConversationTool } from '../../lib/chat-tools';
@@ -491,9 +492,9 @@ const VALID_PIN_KEYS = new Set<string>([
 ]);
 
 const CONFIGURABLE_AGENT_TOOLS = new Set<ToolType>([
-  'claude', 'codex', 'grok', 'qwen', 'opencode',
+  'claude', 'codex', 'grok', 'antigravity', 'qwen', 'opencode',
   'mimocode', 'kilo', 'openclaw', 'hermes', 'pi', 'kimicode', 'omp',
-  'codebuddy',
+  'codebuddy', 'copilot',
 ]);
 
 // Dynamic Island visibility follows the shared agent-status capability: native
@@ -508,6 +509,8 @@ export function CenterPanel() {
   // whether it (not a terminal tab) is the focused surface.
   const diffTabVisible = state.diffMode === 'tab' && state.diffSelection !== null;
   const diffTabActive = state.diffTabActive;
+  const previewTabVisible = state.previewSelection !== null;
+  const previewTabActive = state.previewTabActive;
   // Diff tab title = basename of the selected file (mirrors DiffPanel's own
   // header name). Computed here so the chrome-tab strip shows it without
   // mounting the DiffPanel body.
@@ -515,6 +518,10 @@ export function CenterPanel() {
     const p = state.diffSelection?.path ?? '';
     return p.replace(/\\/g, '/').split('/').pop() || p || (t('task.tab.changes') || 'Diff');
   }, [state.diffSelection?.path, t]);
+  const previewTabTitle = useMemo(() => {
+    const p = state.previewSelection ?? '';
+    return p.replace(/\\/g, '/').split('/').pop() || p || (t('preview.tab') || 'Preview');
+  }, [state.previewSelection, t]);
 
   const [toolsInstalled, setToolsInstalled] = useState<Record<string, boolean>>({});
   // Per-tool launch override modal (gear icon → opens settings for that tool).
@@ -780,8 +787,8 @@ export function CenterPanel() {
   // TierTerminal added its own focusin + mouseup handlers, causing O(N)
   // dispatch per click with N tabs). When focus wanders to the body or a
   // non-input element, steal it back for the currently active terminal.
-  const activeIdRef = useRef(diffTabActive ? null : activeTerminalId);
-  useEffect(() => { activeIdRef.current = diffTabActive ? null : activeTerminalId; }, [activeTerminalId, diffTabActive]);
+  const activeIdRef = useRef((diffTabActive || previewTabActive) ? null : activeTerminalId);
+  useEffect(() => { activeIdRef.current = (diffTabActive || previewTabActive) ? null : activeTerminalId; }, [activeTerminalId, diffTabActive, previewTabActive]);
   useEffect(() => {
     const enforce = () => {
       setTimeout(() => {
@@ -1351,7 +1358,7 @@ export function CenterPanel() {
           // A terminal tab is "active" only when it's the focused surface —
           // when the diff tab is focused (diffTabActive), no terminal tab
           // should show the active highlight (the diff chrome-tab does).
-          const isActive = session.id === activeTerminalId && !diffTabActive;
+          const isActive = session.id === activeTerminalId && !diffTabActive && !previewTabActive;
           const { icon, title: baseTitle } = renderTabContent(session, isActive);
           // Tool's live OSC 0/2 title (Claude Code conversation summary, etc.)
           // overrides the cwd basename when the tool has set a non-empty one.
@@ -1437,6 +1444,30 @@ export function CenterPanel() {
           </div>
         )}
 
+        {previewTabVisible && (
+          <div
+            className={`chrome-tab ${previewTabActive ? 'active' : ''}`}
+            onClick={() => dispatch({ type: 'SET_PREVIEW_TAB_ACTIVE', active: true })}
+          >
+            <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+            <span className="tab-title" style={{ flex: '1 1 auto', minWidth: 0, whiteSpace: 'nowrap', textOverflow: 'ellipsis', overflow: 'hidden' }}>{previewTabTitle}</span>
+            <div className="tab-actions tab-actions--close-only">
+              <button
+                className="tab-close-btn"
+                onClick={(e) => { e.stopPropagation(); dispatch({ type: 'CLOSE_PREVIEW_TAB' }); }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            </div>
+          </div>
+        )}
+
         <button className="chrome-tab-new" onClick={handleAddTab}>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
         </button>
@@ -1453,7 +1484,7 @@ export function CenterPanel() {
               // Hide every terminal wrapper while the diff tab is focused —
               // the diff surface takes over the content area (the underlying
               // PTYs stay mounted, just not displayed).
-              display: (t.id === activeTerminalId && !diffTabActive) ? 'flex' : 'none',
+              display: (t.id === activeTerminalId && !diffTabActive && !previewTabActive) ? 'flex' : 'none',
               width: '100%',
               height: '100%',
               position: 'relative'
@@ -1496,8 +1527,8 @@ export function CenterPanel() {
                       toolName={AGENT_CATALOG.find(a => a.key === t.tool)?.label}
                       theme={state.currentTheme}
                       lang={state.currentLang}
-                      isActive={t.id === activeTerminalId && !diffTabActive && (!supportsConversationTool(t.tool) || t.viewMode !== 'chat')}
-                      conversationActive={t.id === activeTerminalId && !diffTabActive && supportsConversationTool(t.tool) && t.viewMode === 'chat'}
+                      isActive={t.id === activeTerminalId && !diffTabActive && !previewTabActive && (!supportsConversationTool(t.tool) || t.viewMode !== 'chat')}
+                      conversationActive={t.id === activeTerminalId && !diffTabActive && !previewTabActive && supportsConversationTool(t.tool) && t.viewMode === 'chat'}
                       toolData={t.toolData}
                       folderPath={t.folderPath}
                       resumeToken={t.resumeToken}
@@ -1572,7 +1603,13 @@ export function CenterPanel() {
           </div>
         )}
 
-        {isLaunchpadMode && activeTerminalId && !diffTabActive && (
+        {previewTabVisible && previewTabActive && state.previewSelection && (
+          <div className="terminal-wrapper" style={{ display: 'flex', width: '100%', height: '100%', position: 'relative' }}>
+            <MarkdownPreview path={state.previewSelection} surface="tab" />
+          </div>
+        )}
+
+        {isLaunchpadMode && activeTerminalId && !diffTabActive && !previewTabActive && (
           <div className={`launchpad-container${hasBg && bgUrl ? ' launchpad-has-bg' : ''}`} style={{ position: 'relative' }}>
             {hasBg && bgUrl && (
               <div className="launchpad-bg">

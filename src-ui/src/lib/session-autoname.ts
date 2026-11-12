@@ -29,6 +29,7 @@ import { isTauri } from '../tauri';
 import type { SavedSession } from '../tauri';
 import { getHistorySnapshot, savedAtMs, subscribeHistory } from './history-cache';
 import { getCustomName } from './renamed-sessions';
+import { projectLabel } from './session-groups';
 import {
   getAutoName,
   isAutoNameOptedOut,
@@ -234,11 +235,25 @@ export function goalPhrase(rawTitle: string): string | null {
   return s.length >= 2 ? s : null;
 }
 
-/** Build the display title for one session: its goal phrase. Null when the
+const CJK = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uff00-\uffef]/;
+
+/** Build the display title for one session: `项目｜目标`. Null when the
  *  session has nothing to work from (no recorded title, or no title beyond a
  *  pasted path). */
 export function buildAutoName(session: SavedSession): string | null {
-  return goalPhrase(session.name ?? '');
+  const raw = (session.name ?? '').trim();
+  if (raw.includes('｜') || raw.includes(' | ')) {
+    return raw;
+  }
+  const phrase = goalPhrase(raw);
+  if (!phrase) return null;
+  const project = projectLabel(session);
+  // Already self-describing — don't repeat the folder name in front of it.
+  if (!project || phrase.toLowerCase().startsWith(project.toLowerCase()) || phrase.includes('｜') || phrase.includes(' | ')) {
+    return phrase;
+  }
+  const separator = CJK.test(project) || CJK.test(phrase) ? '｜' : ' | ';
+  return `${project}${separator}${phrase}`;
 }
 
 /** True when this row is ready to be named: quiet long enough to count as a
@@ -248,8 +263,18 @@ function eligible(session: SavedSession, nowMs: number): boolean {
   const id = session.id;
   if (!id || !tool) return false;
   if (getCustomName(tool, id)) return false;      // a manual rename already wins
-  if (getAutoName(tool, id)) return false;        // named once, frozen
   if (isAutoNameOptedOut(tool, id)) return false; // user asked for the original
+  const existing = getAutoName(tool, id);
+  if (existing) {
+    // Upgrade a prefix-less auto-name cached during 53eed6a0, or adopt an
+    // agent hook's `模块｜目标` title that landed after the fallback pass.
+    const raw = (session.name ?? '').trim();
+    const rawHasBar = raw.includes('｜') || raw.includes(' | ');
+    const existingHasBar = existing.includes('｜') || existing.includes(' | ');
+    if (rawHasBar && existing !== raw) return true;
+    if (!existingHasBar && projectLabel(session)) return true;
+    return false;
+  }
   const savedAt = savedAtMs(session.saved_at);
   if (!savedAt || nowMs - savedAt < SETTLE_MS) return false;
   return !!session.name?.trim();
