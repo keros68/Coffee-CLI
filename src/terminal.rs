@@ -1241,7 +1241,7 @@ pub fn prepare_pi_launch(mut args: Vec<String>) -> (Vec<String>, Option<String>)
         return (args, None);
     }
     let session_id = uuid::Uuid::new_v4().to_string();
-    args.push("--session".to_string());
+    args.push("--session-id".to_string());
     args.push(session_id.clone());
     (args, Some(session_id))
 }
@@ -1250,8 +1250,8 @@ fn args_specify_pi_session(args: &[String]) -> bool {
     args.iter().any(|arg| {
         matches!(
             arg.as_str(),
-            "--session" | "--resume" | "-r" | "--continue" | "-c" | "--no-session"
-        ) || arg.starts_with("--session=")
+            "--session" | "--session-id" | "--resume" | "-r" | "--continue" | "-c" | "--no-session"
+        ) || arg.starts_with("--session=") || arg.starts_with("--session-id=")
     })
 }
 
@@ -1558,13 +1558,23 @@ mod tests {
     fn pi_fresh_launch_assigns_session_uuid() {
         let (args, token) = prepare_pi_launch(Vec::new());
         let token = token.expect("fresh Pi launch should get a session UUID");
-        assert_eq!(args, vec!["--session".to_string(), token.clone()]);
+        assert_eq!(args, vec!["--session-id".to_string(), token.clone()]);
         assert!(token_matches("pi", &token));
     }
 
     #[test]
     fn pi_launch_token_respects_existing_session_flags() {
-        for flag in ["--session", "--session=existing", "--resume", "-r", "--continue", "-c", "--no-session"] {
+        for flag in [
+            "--session",
+            "--session=existing",
+            "--session-id",
+            "--session-id=existing",
+            "--resume",
+            "-r",
+            "--continue",
+            "-c",
+            "--no-session",
+        ] {
             let existing = vec![flag.to_string()];
             let (args, token) = prepare_pi_launch(existing.clone());
             assert_eq!(args, existing);
