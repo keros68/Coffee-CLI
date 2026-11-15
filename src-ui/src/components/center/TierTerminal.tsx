@@ -52,6 +52,11 @@ import { THEME_COLORS } from '../../lib/personalization';
 import { useDataAttr } from '../../lib/use-data-attr';
 import { TermContextMenu, type TermContextMenuState } from './TermContextMenu';
 import { findPathCandidates, resolvePathCandidates } from '../../lib/terminal-path-links';
+import {
+  createTerminalSelectionController,
+  extractFormattedTerminalSelection,
+  type TerminalSelectionController,
+} from '../../lib/terminal-selection';
 import '@xterm/xterm/css/xterm.css';
 import './TierTerminal.css';
 
@@ -419,6 +424,7 @@ function TierTerminalImpl({
   const imeLastGoodRef = useRef<{ left: string; top: string } | null>(null);
   const wrapRef  = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
+  const selectionControllerRef = useRef<TerminalSelectionController | null>(null);
   type TerminalSizeSync = ReturnType<typeof createTerminalSizeSync>;
   const sizeSyncRef = useRef<TerminalSizeSync | null>(null);
   const afterFitRef = useRef<(() => void) | null>(null);
@@ -1045,6 +1051,7 @@ function TierTerminalImpl({
     const forwardInput = (rawData: string) => {
       const data = stripRightClickMouse(rawData);
       if (!data) return;
+      selectionControllerRef.current?.onUserInput(data);
       // run-agent-sentinel-test.mjs extracts this handler into a bare vm sandbox:
       // time only with what that environment provides.
       const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -1115,8 +1122,11 @@ function TierTerminalImpl({
 
         // Copy: Ctrl+C / Cmd+C — only when text is selected (otherwise send SIGINT).
         if (cmdOrCtrl && e.code === 'KeyC') {
-          if (term.hasSelection()) {
-            clipboardWrite(term.getSelection());
+          if (selectionControllerRef.current?.hasSelection() ?? term.hasSelection()) {
+            const text = selectionControllerRef.current
+              ? selectionControllerRef.current.getSelectionText()
+              : extractFormattedTerminalSelection(term);
+            clipboardWrite(text);
             return false;
           }
         }
@@ -1145,7 +1155,12 @@ function TierTerminalImpl({
 
         // Linux convention: Ctrl+Shift+C always copies, Ctrl+Shift+V always pastes
         if (e.ctrlKey && e.shiftKey && e.code === 'KeyC') {
-          if (term.hasSelection()) clipboardWrite(term.getSelection());
+          if (selectionControllerRef.current?.hasSelection() ?? term.hasSelection()) {
+            const text = selectionControllerRef.current
+              ? selectionControllerRef.current.getSelectionText()
+              : extractFormattedTerminalSelection(term);
+            clipboardWrite(text);
+          }
           return false;
         }
         if (e.ctrlKey && e.shiftKey && e.code === 'KeyV') {
@@ -1175,6 +1190,9 @@ function TierTerminalImpl({
     // pointer-button/motion mouse capture while remembering that the TUI wants
     // SGR wheel scrolling (`sgrWheelRef`), so selection is always "select first,
     // then explicitly Copy / Ctrl+C" and mouse wheel scrolling still works.
+    // Declared above sgrWheelRef so run-terminal-wheel-test.mjs's plain-JS vm
+    // slice starting at sgrWheelRef contains zero TypeScript annotations.
+    let selectionWheelHook: ((notches: number, inAltScreen: boolean, deltaY: number) => number) | null = null;
     const sgrWheelRef = { current: false };
     const MOUSE_CAPTURE_DEC_MODES = new Set([9, 1000, 1002, 1003, 1005, 1006, 1015, 1016]);
     const coreMouseService = Reflect.get(Reflect.get(term, '_core') ?? {}, 'coreMouseService');
@@ -1270,10 +1288,13 @@ function TierTerminalImpl({
         // / Linux report line deltas (deltaMode 1, ~3 lines/notch). Convert to
         // notches, then 3 arrow presses per notch (the xterm convention),
         // capped so a fast flick can't flood the PTY.
-        const notches =
+        const rawNotches =
           e.deltaMode === 1 ? Math.abs(e.deltaY) / 3 :              // lines
           e.deltaMode === 2 ? Math.abs(e.deltaY) :                  // pages
           Math.abs(e.deltaY) / 100;                                // pixels
+        const notches = typeof selectionWheelHook === 'function'
+          ? selectionWheelHook(rawNotches, inAltScreen, e.deltaY)
+          : rawNotches;
         const lines = Math.max(1, Math.min(Math.round(notches * 3), 9));
 
         // ConPTY drops these agents' mouse-enable sequences, and our CSI filter
@@ -1307,6 +1328,40 @@ function TierTerminalImpl({
       } catch {
         return true; // any introspection failure → fall back to xterm default
       }
+    });
+
+    const selectionController = createTerminalSelectionController({
+      term,
+      scrollAltScreen: (direction, lines) => {
+        if (sgrWheelRef.current || (IS_WINDOWS && (tool === 'pi' || tool === 'omp' || tool === 'claude'))) {
+          const col = Math.max(1, Math.floor(term.cols / 2));
+          const row = Math.max(1, Math.floor(term.rows / 2));
+          const button = direction > 0 ? 65 : 64;
+          const reports = Math.max(1, Math.min(Math.round(lines / 3), 2));
+          forwardTerminalInput(sessionId, `\x1b[<${button};${col};${row}M`.repeat(reports)).catch(() => {});
+          return;
+        }
+        const down = direction > 0;
+        const seq = term.modes.applicationCursorKeysMode
+          ? (down ? '\x1bOB' : '\x1bOA')
+          : (down ? '\x1b[B' : '\x1b[A');
+        forwardTerminalInput(sessionId, seq.repeat(Math.max(1, Math.min(lines, 6)))).catch(() => {});
+      },
+    });
+    selectionControllerRef.current = selectionController;
+    selectionWheelHook = selectionController.onWheelBeforeForward;
+    const selWriteParsedDisposable = term.onWriteParsed(() => selectionController.onWriteParsed());
+    const selBufferChangeDisposable = term.buffer.onBufferChange(() => selectionController.onBufferChange());
+    const selResizeDisposable = term.onResize(({ cols, rows }) => selectionController.onResize(cols, rows));
+    unlisteners.push(() => {
+      selectionWheelHook = null;
+      if (selectionControllerRef.current === selectionController) {
+        selectionControllerRef.current = null;
+      }
+      selWriteParsedDisposable.dispose();
+      selBufferChangeDisposable.dispose();
+      selResizeDisposable.dispose();
+      selectionController.dispose();
     });
 
     // Clickable links. URLs (http/https/file) open in the OS default browser.
@@ -1907,8 +1962,12 @@ function TierTerminalImpl({
     if (!root) return;
     const onCopy = (e: ClipboardEvent) => {
       const term = xtermRef.current;
-      if (!term || !term.hasSelection() || !e.clipboardData) return;
-      e.clipboardData.setData('text/plain', term.getSelection());
+      const hasSel = selectionControllerRef.current?.hasSelection() ?? term?.hasSelection() ?? false;
+      if (!term || !hasSel || !e.clipboardData) return;
+      const text = selectionControllerRef.current
+        ? selectionControllerRef.current.getSelectionText()
+        : extractFormattedTerminalSelection(term);
+      e.clipboardData.setData('text/plain', text);
       e.preventDefault();
     };
     root.addEventListener('copy', onCopy, { capture: true });
@@ -2294,7 +2353,10 @@ function TierTerminalImpl({
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          const sel = xtermRef.current?.getSelection() ?? '';
+          const term = xtermRef.current;
+          const sel = selectionControllerRef.current
+            ? selectionControllerRef.current.getSelectionText()
+            : (term ? extractFormattedTerminalSelection(term) : '');
           ctxMenuSelectionRef.current = sel;
           setCtxMenu({
             x: e.clientX,
@@ -2350,7 +2412,7 @@ function TierTerminalImpl({
             // Blurring now would cancel an in-flight composition — let it
             // finish; the next click re-anchors.
             if (imeFrozenRef.current) return;
-            if (wasDrag || xtermRef.current?.hasSelection()) return;
+            if (wasDrag || selectionControllerRef.current?.hasSelection() || xtermRef.current?.hasSelection()) return;
             const textarea = termRef.current?.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
             if (textarea) {
               textarea.blur();
@@ -2441,7 +2503,11 @@ function TierTerminalImpl({
           menu={ctxMenu}
           onClose={closeCtxMenu}
           onCopy={() => {
-            const text = xtermRef.current?.getSelection() || ctxMenuSelectionRef.current;
+            const term = xtermRef.current;
+            const text =
+              (selectionControllerRef.current?.getSelectionText() ||
+                (term ? extractFormattedTerminalSelection(term) : '')) ||
+              ctxMenuSelectionRef.current;
             ctxMenuSelectionRef.current = '';
             if (text) clipboardWrite(text);
             closeCtxMenu();
@@ -2460,6 +2526,7 @@ function TierTerminalImpl({
             closeCtxMenu();
           }}
           onSelectAll={() => {
+            selectionControllerRef.current?.clear();
             xtermRef.current?.selectAll();
             closeCtxMenu();
           }}
