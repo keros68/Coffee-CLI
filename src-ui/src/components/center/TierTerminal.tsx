@@ -52,6 +52,7 @@ import { THEME_COLORS } from '../../lib/personalization';
 import { useDataAttr } from '../../lib/use-data-attr';
 import { TermContextMenu, type TermContextMenuState } from './TermContextMenu';
 import { findPathCandidates, resolvePathCandidates } from '../../lib/terminal-path-links';
+import { LINK_RE, trimLink } from '../../lib/terminal-url-links';
 import {
   createTerminalSelectionController,
   extractFormattedTerminalSelection,
@@ -1370,10 +1371,6 @@ function TierTerminalImpl({
     // cwd, so a wrong guess is never underlined; click opens the file with its
     // default app and right-click adds file actions to the menu. Unquoted paths
     // with spaces are not matched (see terminal-path-links.ts).
-    // URLs are ASCII per RFC 3986; the \u0080-\uffff guard stops the match at
-    // any non-ASCII char so trailing CJK punctuation/text (e.g. "https://x，看到…")
-    // doesn't get swallowed into the link.
-    const LINK_RE = /(https?:\/\/[^\s<>()"'\u0080-\uffff]+|file:\/\/\/[^\s<>()"'\u0080-\uffff]+)/g;
     term.registerLinkProvider({
       provideLinks(bufferLineNumber, callback) {
         const line = term.buffer.active.getLine(bufferLineNumber - 1);
@@ -1409,7 +1406,7 @@ function TierTerminalImpl({
         let m;
         LINK_RE.lastIndex = 0;
         while ((m = LINK_RE.exec(text)) !== null) {
-          const raw = m[0].replace(/[),.]+$/, '');
+          const raw = trimLink(m[0]);
           urlSpans.push([m.index, m.index + raw.length]);
           links.push({
             range: rangeOf(m.index, raw.length),
