@@ -265,6 +265,16 @@ Delete this note whenever you're ready, and start your first task.`,
   'tools.memory.write_error': 'Failed to save the file',
   'tools.tab.memory': 'Global Memory',
   'tools.title': 'CLI Tools & Global Memory',
+  'cli_update.action': 'Update {version}',
+  'cli_update.label': 'Update',
+  'cli_update.updating': 'Updating',
+  'cli_update.hint': '{current} → {latest}',
+  'cli_update.failed': 'Update failed. Check the network and installation permissions, then retry.',
+  'cli_update.timeout': 'Update timed out. Try again later.',
+  'cli_update.verify': 'Could not verify the new version. Try again.',
+  'cli_update.in_use': 'Close any running Codex process before updating.',
+  'cli_update.close_tabs': 'Close {count} running tab(s) before updating.',
+  'cli_update.log_hint': 'Details: ~/.coffee-cli/logs/cli-update-{tool}.log',
 } as const;
 
 export type I18nKey = keyof typeof en;

@@ -11,6 +11,7 @@ mod json_file;
 mod tool_config;
 mod tool_memory;
 mod tools;
+mod cli_updates;
 mod git;
 mod shell_probe;
 #[cfg(target_os = "linux")]

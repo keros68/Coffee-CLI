@@ -5938,6 +5938,8 @@ pub fn start_ui(pending_launch: Option<crate::launch::LaunchRequest>) -> anyhow:
             get_terminal_session_token,
             check_network_port,
             check_tools_installed,
+            crate::cli_updates::check_cli_update,
+            crate::cli_updates::update_cli,
             detect_shells,
             crate::tools::list_tools,
             maintain_tool_integration,

@@ -17,6 +17,8 @@ export const isTauri =
   typeof window !== 'undefined' &&
   (!!window.__TAURI_INTERNALS__ || !!window.__TAURI__);
 
+export interface CliUpdateStatus { tool: string; current: string | null; latest: string | null; available: boolean }
+
 // Resolve the invoke function across Tauri v1 / v2
 function resolveInvoke(): ((cmd: string, args?: Record<string, unknown>) => Promise<unknown>) | null {
   const w = window as unknown as Record<string, unknown>;
@@ -186,6 +188,8 @@ export const commands = {
   // Tool availability detection
   checkToolsInstalled: () =>
     invoke<Record<string, boolean>>('check_tools_installed'),
+  checkCliUpdate: (tool: string) => invoke<CliUpdateStatus>('check_cli_update', { tool }),
+  updateCli: (tool: string) => invoke<CliUpdateStatus>('update_cli', { tool }),
 
   // External launch request (`launch --tool <id> [--cwd <dir>]`) handed to
   // the GUI at cold start. Drained exactly once by CenterPanel on mount —

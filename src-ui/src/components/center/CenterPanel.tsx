@@ -6,6 +6,7 @@ import { TierTerminal } from './TierTerminal';
 import { ConversationView } from './ConversationView';
 import { FourSplitGrid } from './FourSplitGrid';
 import { ToolConfigModal } from './ToolConfigModal';
+import { CliUpdateButton } from './CliUpdateButton';
 import { ContributionHeatmap } from './ContributionHeatmap';
 import { ErrorBoundary } from '../common/ErrorBoundary';
 import { DiffPanel } from '../right/DiffPanel';
@@ -1360,6 +1361,14 @@ export function CenterPanel() {
                                   }}
                                 >
                                   <div className="launchpad-icon">{tool.icon}</div>
+                                  {!isTerminal && tool.key && toolsInstalled[tool.key] !== undefined && (
+                                    <CliUpdateButton
+                                      tool={tool.key}
+                                      active={!configModalTool}
+                                      installed={toolsInstalled[tool.key] === true}
+                                      runningCount={terminals.filter(s => s.tool === tool.key).length}
+                                    />
+                                  )}
                                   <div className="launchpad-card-info">
                                     <span style={isTerminal ? { display: 'inline-flex', alignItems: 'center', gap: '6px' } : undefined}>
                                       {tool.label}
