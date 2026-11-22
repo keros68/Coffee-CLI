@@ -359,6 +359,43 @@ function suspendWebglRenderer(webglRef: { current: WebglAddon | null }): void {
   }
 }
 
+// xterm's public `Terminal` wrapper does not expose `_syncTextArea`; the
+// implementation lives on `term._core` (CoreBrowserTerminal.ts). Calling
+// `term._syncTextArea` directly silently evaluated to `undefined`.
+function syncXtermTextArea(term: Terminal): void {
+  const internal = term as unknown as {
+    _core?: { _syncTextArea?: () => void };
+    _syncTextArea?: () => void;
+  };
+  if (typeof internal._core?._syncTextArea === 'function') {
+    internal._core._syncTextArea();
+  } else {
+    internal._syncTextArea?.();
+  }
+}
+
+function syncAndAnchorWindowsIme(
+  term: Terminal,
+  textarea: HTMLTextAreaElement,
+  lastGoodRef: { current: { left: string; top: string } | null },
+): void {
+  syncXtermTextArea(term);
+  const b = term.buffer.active;
+  // Parked = the real cursor is NOT at the input box: at the right edge
+  // OR outside the bottom rows. Claude Code (Ink) hides the real cursor
+  // and parks it mid-render while the input box lives at the bottom.
+  const parked = b.cursorX >= term.cols - 4 || b.cursorY < term.rows - 3;
+  if (parked && lastGoodRef.current) {
+    textarea.style.left = lastGoodRef.current.left;
+    textarea.style.top = lastGoodRef.current.top;
+  } else if (!parked && textarea.style.left && textarea.style.top) {
+    lastGoodRef.current = {
+      left: textarea.style.left,
+      top: textarea.style.top,
+    };
+  }
+}
+
 interface TierTerminalProps {
   sessionId: string;
   tool: ToolType;
@@ -423,6 +460,8 @@ function TierTerminalImpl({
   // this when it detects the cursor parked. Populated by the onCursorMove tracker
   // in the init effect.
   const imeLastGoodRef = useRef<{ left: string; top: string } | null>(null);
+  const imeRebindTimerRef = useRef<number | null>(null);
+  const imeRebindRafRef = useRef<number | null>(null);
   const wrapRef  = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const selectionControllerRef = useRef<TerminalSelectionController | null>(null);
@@ -779,35 +818,15 @@ function TierTerminalImpl({
       // candidate" users feel as 乱跳. We pin the textarea at compositionstart
       // and hold it until compositionend, so the candidate stays put for the
       // whole word/phrase. Clicks still re-anchor between compositions.
-      if (!__IS_LINUX__ && navigator.userAgent.toLowerCase().includes('win')) {
+      if (!__IS_LINUX__ && IS_WINDOWS) {
         const imeTextarea = termRef.current.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
         if (imeTextarea) {
           const freeze = () => {
             // Backport of xterm PR #5759 (upstream issue #5734): re-anchor at
             // compositionstart so the IME uses the latest cursor, not a stale
-            // mid-parse position. But some TUIs park the buffer cursor at the
-            // right edge after a backspace; anchoring there parks the candidate
-            // window too. When the cursor looks parked (right edge), restore the
-            // last non-parked position tracked by onCursorMove below instead.
-            const b = term.buffer.active;
-            // Parked = the real cursor is NOT at the input box: at the right edge
-            // OR outside the bottom rows. Claude Code (Ink) hides the real cursor
-            // and parks it mid-render while the input box lives at the bottom.
-            const parked = b.cursorX >= term.cols - 4 || b.cursorY < term.rows - 3;
-            if (parked && imeLastGoodRef.current) {
-              imeTextarea.style.left = imeLastGoodRef.current.left;
-              imeTextarea.style.top = imeLastGoodRef.current.top;
-            } else {
-              (term as unknown as { _syncTextArea?: () => void })._syncTextArea?.();
-              // Remember this non-parked position as the last good anchor, so a
-              // later parked composition (Claude Code after backspace) can fall
-              // back to it. The onCursorMove tracker alone missed this because
-              // Claude Code never re-moves the cursor to the input box via CSI.
-              imeLastGoodRef.current = {
-                left: imeTextarea.style.left,
-                top: imeTextarea.style.top,
-              };
-            }
+            // mid-parse position. When the TUI parks the buffer cursor away from
+            // the input box, fall back to the last non-parked anchor.
+            syncAndAnchorWindowsIme(term, imeTextarea, imeLastGoodRef);
             imeFrozenRef.current = {
               left: imeTextarea.style.left,
               top: imeTextarea.style.top,
@@ -1927,6 +1946,14 @@ function TierTerminalImpl({
 
     return () => {
       mounted = false;
+      if (imeRebindRafRef.current !== null) {
+        cancelAnimationFrame(imeRebindRafRef.current);
+        imeRebindRafRef.current = null;
+      }
+      if (imeRebindTimerRef.current !== null) {
+        window.clearTimeout(imeRebindTimerRef.current);
+        imeRebindTimerRef.current = null;
+      }
       setTerminalControlReady(sessionId, false);
       unregisterFocus();
       ro.disconnect();
@@ -2139,7 +2166,69 @@ function TierTerminalImpl({
   // inserts its absolute path at the cursor as if typed. Only the active
   // tab claims the rect — inactive tabs return null and are skipped.
   const isActiveRef = useRef(isActive);
-  useEffect(() => { isActiveRef.current = isActive; }, [isActive]);
+  isActiveRef.current = isActive;
+
+  // Re-anchor .xterm-helper-textarea and cycle blur→focus on Windows so
+  // WebView2 re-establishes its TSF text-store binding after tab switches,
+  // window foreground returns, or clicks (prevents IME candidate popup from
+  // detaching to screen (0,0) and double-committing in fallback mode).
+  const rebindWindowsIme = useCallback((opts?: { onlyIfTerminalOrBody?: boolean; deferFrame?: boolean }) => {
+    if (__IS_LINUX__ || !IS_WINDOWS) return;
+    if (imeRebindRafRef.current !== null) {
+      cancelAnimationFrame(imeRebindRafRef.current);
+      imeRebindRafRef.current = null;
+    }
+    const run = () => {
+      imeRebindRafRef.current = null;
+      if (!isActiveRef.current || imeFrozenRef.current) return;
+      const host = termRef.current;
+      const term = xtermRef.current;
+      if (!host || !term || host.offsetParent === null) return;
+      if (selectionControllerRef.current?.hasSelection() || term.hasSelection()) return;
+      const textarea = host.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
+      if (!textarea || !textarea.isConnected) return;
+
+      const active = document.activeElement;
+      if (opts?.onlyIfTerminalOrBody) {
+        if (active && active !== textarea && active !== document.body && active !== document.documentElement) {
+          return;
+        }
+      } else if (
+        active
+        && active !== textarea
+        && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || (active as HTMLElement).isContentEditable)
+      ) {
+        return;
+      }
+
+      syncAndAnchorWindowsIme(term, textarea, imeLastGoodRef);
+      if (imeRebindTimerRef.current !== null) {
+        window.clearTimeout(imeRebindTimerRef.current);
+        imeRebindTimerRef.current = null;
+      }
+      textarea.blur();
+      imeRebindTimerRef.current = window.setTimeout(() => {
+        imeRebindTimerRef.current = null;
+        if (!isActiveRef.current || imeFrozenRef.current || !textarea.isConnected) return;
+        const cur = document.activeElement;
+        if (
+          cur
+          && cur !== textarea
+          && (cur.tagName === 'INPUT' || cur.tagName === 'TEXTAREA' || (cur as HTMLElement).isContentEditable)
+        ) {
+          return;
+        }
+        textarea.focus();
+      }, 0);
+    };
+
+    if (opts?.deferFrame) {
+      imeRebindRafRef.current = requestAnimationFrame(run);
+    } else {
+      run();
+    }
+  }, []);
+
   useEffect(() => {
     return registerFileDropTarget({
       priority: 100,
@@ -2236,6 +2325,19 @@ function TierTerminalImpl({
     };
   }, [isActive, sessionId]);
 
+  const wasActiveForImeRef = useRef(isActive);
+  useEffect(() => {
+    if (!isActive) {
+      wasActiveForImeRef.current = false;
+      return;
+    }
+    if (canvasHidden) return;
+    if (!wasActiveForImeRef.current) {
+      wasActiveForImeRef.current = true;
+      rebindWindowsIme({ deferFrame: true });
+    }
+  }, [isActive, canvasHidden, rebindWindowsIme]);
+
   // ── Stale-frame ghost on window foreground (issue #47 comment) ──────────
   // While the OS window is backgrounded the browser throttles rAF to ~1 fps
   // (or pauses it entirely), so xterm's WebGL canvas stops repainting even
@@ -2268,6 +2370,7 @@ function TierTerminalImpl({
         cancelAnimationFrame(f1);
         clearTimeout(fallback);
         setCanvasHidden(false);
+        rebindWindowsIme({ onlyIfTerminalOrBody: true, deferFrame: true });
       };
       f1 = requestAnimationFrame(() => {
         try {
@@ -2283,7 +2386,7 @@ function TierTerminalImpl({
       const fallback = setTimeout(reveal, 180);
     });
     return unsubscribe;
-  }, []);
+  }, [rebindWindowsIme]);
 
   // ── Startup splash dismissal ────────────────────────────────────────────
   // Detect real TUI via alternate screen buffer entry (\x1b[?1049h).
@@ -2434,18 +2537,14 @@ function TierTerminalImpl({
           // is deliberately NOT here — cycling focus on mousedown interrupts
           // the in-progress mouse gesture and breaks xterm drag selection
           // (issue #92). It runs in onClick, once the gesture is over.
-          if (!__IS_LINUX__ && navigator.userAgent.toLowerCase().includes('win') && e.button === 0) {
+          if (!__IS_LINUX__ && IS_WINDOWS && e.button === 0) {
             // Never move the textarea mid-composition — the candidate window
             // is pinned for the composition's lifetime (see init effect).
             if (imeFrozenRef.current) return;
             const term = xtermRef.current;
             const textarea = termRef.current?.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
             if (term && textarea) {
-              // Re-anchor with xterm's own accurate _syncTextArea (the same
-              // backport as the compositionstart freeze above) instead of the
-              // old clientWidth/cols approximation that drifted right as
-              // cursorX grew.
-              (term as unknown as { _syncTextArea?: () => void })._syncTextArea?.();
+              syncAndAnchorWindowsIme(term, textarea, imeLastGoodRef);
             }
           }
         }}
@@ -2453,25 +2552,14 @@ function TierTerminalImpl({
           // Windows IME fix (issue #88), part 2 of 2: the mouse gesture is
           // complete, so blur/refocus the helper textarea to force Windows IME
           // to re-read the position anchored on mousedown. Skipped when the
-          // gesture produced a selection — that was a drag-select, not an
-          // intent to type, and cycling focus there serves no purpose
-          // (issue #92).
+          // gesture was a drag or produced a selection (issue #92).
           const downPos = mouseDownPosRef.current;
           mouseDownPosRef.current = null;
           const wasDrag = downPos
             ? Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > 4
             : false;
-          if (!__IS_LINUX__ && navigator.userAgent.toLowerCase().includes('win')) {
-            // Blurring now would cancel an in-flight composition — let it
-            // finish; the next click re-anchors.
-            if (imeFrozenRef.current) return;
-            if (wasDrag || selectionControllerRef.current?.hasSelection() || xtermRef.current?.hasSelection()) return;
-            const textarea = termRef.current?.querySelector('.xterm-helper-textarea') as HTMLTextAreaElement | null;
-            if (textarea) {
-              textarea.blur();
-              setTimeout(() => textarea.focus(), 0);
-            }
-          }
+          if (wasDrag) return;
+          rebindWindowsIme();
         }}
         onPaste={async (e) => {
           // Issue #89: Support pasting images from clipboard into terminal
