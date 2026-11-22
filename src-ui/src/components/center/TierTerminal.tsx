@@ -132,11 +132,11 @@ function deriveSelectionBg(hex: string, isDark: boolean): string {
 // for those tools only. Every other tool keeps xterm's foreground caret; the
 // conservative default makes new and terminal-only tools usable immediately.
 // Build the xterm fontFamily stack. `userFont` (from Settings) is prepended
-// so it wins for the glyphs it has; the bundled CascadiaMono + Nerd Fonts +
+// so it wins for the glyphs it has; the bundled GoogleSansCode, then CascadiaMono + Nerd Fonts +
 // platform monospace faces follow, and the CJK cascade backstops Chinese/
 // Japanese/Korean (so picking a Latin-only font never re-breaks CJK).
-// Embedded CascadiaMono guarantees consistent box-drawing; the per-glyph
-// cascade skips names absent on the host so the right OS face always wins.
+// Embedded GoogleSansCode/CascadiaMono guarantee consistent metrics and box-drawing;
+// the per-glyph cascade skips names absent on the host so the right OS face always wins.
 export function buildFontFamily(userFont?: string): string {
   const ua = navigator.userAgent.toLowerCase();
   const isLinux = ua.includes('linux');
@@ -144,10 +144,10 @@ export function buildFontFamily(userFont?: string): string {
   const NERD = "'CaskaydiaCove Nerd Font', 'JetBrainsMono Nerd Font', 'MesloLGS NF', 'FiraCode Nerd Font', 'Hack Nerd Font'";
   const CJK = "'PingFang SC', 'PingFang TC', 'Hiragino Sans', 'Apple SD Gothic Neo', 'Microsoft YaHei', 'Microsoft JhengHei', 'Yu Gothic UI', 'Malgun Gothic', 'Noto Sans CJK SC', 'Noto Sans CJK TC', 'Noto Sans CJK JP', 'Noto Sans CJK KR', 'WenQuanYi Micro Hei'";
   const base = isLinux
-    ? `CascadiaMono, ${NERD}, 'Ubuntu Mono', 'Noto Sans Mono', 'DejaVu Sans Mono', 'Liberation Mono', ${CJK}, monospace`
+    ? `GoogleSansCode, CascadiaMono, ${NERD}, 'Ubuntu Mono', 'Noto Sans Mono', 'DejaVu Sans Mono', 'Liberation Mono', ${CJK}, monospace`
     : isMac
-      ? `CascadiaMono, ${NERD}, ui-monospace, Menlo, Monaco, 'Courier New', ${CJK}, monospace`
-      : `CascadiaMono, ${NERD}, 'Cascadia Mono', Consolas, 'Courier New', ${CJK}, monospace`;
+      ? `GoogleSansCode, CascadiaMono, ${NERD}, ui-monospace, Menlo, Monaco, 'Courier New', ${CJK}, monospace`
+      : `GoogleSansCode, CascadiaMono, ${NERD}, 'Cascadia Mono', Consolas, 'Courier New', ${CJK}, monospace`;
   return userFont ? `"${userFont}", ${base}` : base;
 }
 
@@ -686,9 +686,10 @@ function TierTerminalImpl({
       xtermRef.current?.focus();
     });
 
-    // Wait for CascadiaMono to load before opening the terminal so xterm
+    // Wait for the bundled fonts to load before opening the terminal so xterm
     // measures cell metrics with the correct font (avoids box-drawing misalignment).
     const fontReady = Promise.all([
+      document.fonts.load('14px GoogleSansCode'),
       document.fonts.load('14px CascadiaMono'),
       termFont ? document.fonts.load(`14px "${termFont}"`) : Promise.resolve(),
     ]).catch(() => {});

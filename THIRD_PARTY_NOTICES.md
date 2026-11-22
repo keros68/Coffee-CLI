@@ -50,6 +50,14 @@ The full license is included beside the application as `CONPTY-LICENSE.txt`.
 Source: https://github.com/microsoft/terminal
 Package: https://www.nuget.org/packages/Microsoft.Windows.Console.ConPTY/1.24.261001001
 
+## Google Sans Code
+
+Coffee CLI bundles the `GoogleSansCode-Variable.ttf` terminal font.
+
+Copyright 2025 The Google Sans Code Project Authors (github.com/googlefonts/googlesans-code).
+Licensed under the SIL Open Font License, Version 1.1 (`src-ui/public/fonts/OFL-GoogleSansCode.txt`).
+Source: https://github.com/google/fonts/tree/main/ofl/googlesanscode
+
 ## Service names
 
 Weixin, WeChat, and Telegram are trademarks of their respective owners. Their
