@@ -5677,11 +5677,26 @@ async fn check_network_port(host: String, port: u16) -> Result<bool, String> {
     Ok(reachable)
 }
 
-#[tauri::command(async)]
-fn open_url(url: String) -> Result<(), String> {
-    if url.is_empty() || url.starts_with('-') || url.contains('\0') {
+/// Normalize a target before passing it to the OS launcher.
+/// `file://` URIs (e.g. from OSC 8 terminal links with `%20` spaces or `#L10`
+/// line fragments) are decoded into native filesystem paths so Windows
+/// `ShellExecuteW` opens the file/folder directly instead of routing through a
+/// web browser or failing on URL fragments.
+fn normalize_open_target(raw: &str) -> Result<String, String> {
+    if raw.is_empty() || raw.starts_with('-') || raw.contains('\0') {
         return Err("Invalid URL or file path".into());
     }
+    if raw.len() >= 7 && raw[..7].eq_ignore_ascii_case("file://") {
+        let parsed = url::Url::parse(raw).map_err(|_| "Invalid file URL".to_string())?;
+        let path = parsed.to_file_path().map_err(|_| "Invalid file URL path".to_string())?;
+        return Ok(path.to_string_lossy().into_owned());
+    }
+    Ok(raw.to_string())
+}
+
+#[tauri::command(async)]
+fn open_url(url: String) -> Result<(), String> {
+    let url = normalize_open_target(&url)?;
     #[cfg(target_os = "windows")]
     {
         use windows::{core::{w, PCWSTR}, Win32::{Foundation::HWND,

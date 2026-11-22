@@ -50,7 +50,17 @@ assert.deepEqual(paths('a.ts#L10-L20'), ['a.ts']);
 assert.deepEqual(paths('https://example.com/a.ts'), [], 'URLs are left alone');
 assert.deepEqual(paths('v3.6.6 at 12:30 -- --flag=a/b'), [], 'versions, times, flags');
 assert.deepEqual(paths('TUI 和 desktop 的 / 区别'), [], 'a lone slash');
-assert.deepEqual(paths('Coffee CLI_3.6.6_x64-setup.exe'), ['CLI_3.6.6_x64-setup.exe'], 'unquoted spaces split the path; only a fragment is tried');
+assert.deepEqual(paths('Coffee CLI_3.6.6_x64-setup.exe'), ['CLI_3.6.6_x64-setup.exe'], 'unquoted spaces without drive prefix split the path');
+assert.ok(
+  paths('• 安装包：D:/work/coffeecli-up/target/release/bundle/nsis/Coffee CLI_3.6.6_x64-setup.exe')
+    .includes('D:/work/coffeecli-up/target/release/bundle/nsis/Coffee CLI_3.6.6_x64-setup.exe'),
+  'drive-letter path with space and file extension is captured as a whole candidate',
+);
+assert.ok(
+  paths('run "C:\\Program Files\\Git\\bin\\git.exe" now')
+    .includes('C:\\Program Files\\Git\\bin\\git.exe'),
+  'quoted path with spaces is captured as a whole candidate',
+);
 
 // ─── lookups ────────────────────────────────────────────────────────────────
 const cwd = 'D:\\p';

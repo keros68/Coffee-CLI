@@ -129,8 +129,34 @@ fn copy_preserves_symlinks_without_following_cycles() {
 
 #[test]
 fn invalid_open_targets_never_launch_a_handler() {
-    for target in ["", "-aCalculator", "https://example.invalid/\0ignored"] {
+    for target in ["", "-aCalculator", "https://example.invalid/\0ignored", "file://not a valid host/path"] {
         assert!(open_url(target.into()).is_err());
+    }
+}
+
+#[test]
+fn normalize_open_target_decodes_file_urls_and_strips_fragments() {
+    assert_eq!(
+        normalize_open_target("https://example.com/a?x=1#top").unwrap(),
+        "https://example.com/a?x=1#top"
+    );
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            normalize_open_target("file:///D:/work/coffeecli-up/target/release/bundle/nsis/Coffee%20CLI_3.6.6_x64-setup.exe").unwrap(),
+            r"D:\work\coffeecli-up\target\release\bundle\nsis\Coffee CLI_3.6.6_x64-setup.exe"
+        );
+        assert_eq!(
+            normalize_open_target("file:///D:/work/coffeecli-up/src/server.rs#L10-L20").unwrap(),
+            r"D:\work\coffeecli-up\src\server.rs"
+        );
+    }
+    #[cfg(unix)]
+    {
+        assert_eq!(
+            normalize_open_target("file:///tmp/Coffee%20CLI.txt#L5").unwrap(),
+            "/tmp/Coffee CLI.txt"
+        );
     }
 }
 

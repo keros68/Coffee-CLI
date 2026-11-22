@@ -52,7 +52,7 @@ import { THEME_COLORS } from '../../lib/personalization';
 import { useDataAttr } from '../../lib/use-data-attr';
 import { TermContextMenu, type TermContextMenuState } from './TermContextMenu';
 import { findPathCandidates, resolvePathCandidates } from '../../lib/terminal-path-links';
-import { LINK_RE, trimLink } from '../../lib/terminal-url-links';
+import { LINK_RE, parseOsc8Link, trimLink } from '../../lib/terminal-url-links';
 import {
   createTerminalSelectionController,
   extractFormattedTerminalSelection,
@@ -539,6 +539,30 @@ function TierTerminalImpl({
       // Required to load Unicode11Addon below (xterm 6 gates the unicode
       // provider API as proposed). No other proposed API is used.
       allowProposedApi: true,
+      // Handle OSC 8 hyperlinks (including `file:///` links emitted by CLIs
+      // like Antigravity / Claude Code). Without `allowNonHttpProtocols`,
+      // xterm silently drops `file:///` OSC 8 links while still drawing their
+      // underline, and falls back to `window.open()` for http(s) links.
+      linkHandler: {
+        allowNonHttpProtocols: true,
+        activate: (_event, uri) => {
+          const parsed = parseOsc8Link(uri);
+          if (!parsed) return;
+          commands.openUrl(parsed.target).catch(() => {});
+        },
+        hover: (_event, uri) => {
+          const parsed = parseOsc8Link(uri);
+          if (parsed?.localPath) {
+            hoveredPathRef.current = parsed.localPath;
+          }
+        },
+        leave: (_event, uri) => {
+          const parsed = parseOsc8Link(uri);
+          if (parsed?.localPath && hoveredPathRef.current === parsed.localPath) {
+            hoveredPathRef.current = null;
+          }
+        },
+      },
       theme: buildXtermTheme(theme, hasBg, termColorScheme, !selfRenderedCaret, isDarkTheme),
     });
 
@@ -1367,41 +1391,59 @@ function TierTerminalImpl({
     });
 
     // Clickable links. URLs (http/https/file) open in the OS default browser.
-    // File paths (`src/a.ts`, `src/a.ts:42`, `D:\work\x.md`) are linked only
-    // when the backend finds them on disk, relative ones against the session
-    // cwd, so a wrong guess is never underlined; click opens the file with its
-    // default app and right-click adds file actions to the menu. Unquoted paths
-    // with spaces are not matched (see terminal-path-links.ts).
+    // File paths (`src/a.ts`, `src/a.ts:42`, `D:\work\x.md`, `@refs`, and
+    // quoted or drive-letter paths with spaces) are linked only when the
+    // backend finds them on disk, relative ones against the session cwd, so a
+    // wrong guess is never underlined; click opens the file with its default
+    // app and right-click adds file actions to the menu. Soft-wrapped rows are
+    // joined into one logical line so long URLs/paths stay clickable.
     term.registerLinkProvider({
       provideLinks(bufferLineNumber, callback) {
-        const line = term.buffer.active.getLine(bufferLineNumber - 1);
-        if (!line) { callback([]); return; }
-        // Build the line text alongside JS-index → terminal-column maps.
-        // xterm's range.x is in terminal columns, but a CJK / emoji char is
-        // one JS code-unit-ish but two columns wide. Using m.index directly
-        // makes the hover underline drift left by one column per wide char
-        // sitting before the link on the same line. Cell iteration keeps the
-        // mapping accurate regardless of wide-char prefix.
+        const buf = term.buffer.active;
+        const targetIdx = bufferLineNumber - 1;
+        if (!buf.getLine(targetIdx)) { callback([]); return; }
+        // Expand across contiguous soft-wrapped lines (bounded to 8 rows total).
+        const MAX_WRAP_SPAN = 8;
+        let startIdx = targetIdx;
+        while (startIdx > 0 && targetIdx - startIdx < MAX_WRAP_SPAN - 1 && buf.getLine(startIdx)?.isWrapped) {
+          startIdx--;
+        }
+        let endIdx = targetIdx;
+        while (endIdx - startIdx < MAX_WRAP_SPAN - 1 && buf.getLine(endIdx + 1)?.isWrapped) {
+          endIdx++;
+        }
+        // Build the logical line text alongside JS-index → (1-based col, 1-based row) maps.
+        // Cell iteration keeps column mapping accurate across wide CJK/emoji characters
+        // and soft-wrapped line boundaries.
         let text = '';
-        const colByStrIdx: number[] = [];
-        const endColByStrIdx: number[] = []; // 1-based last column of the cell
-        const cellCount = line.length;
-        for (let col = 0; col < cellCount; col++) {
-          const cell = line.getCell(col);
-          if (!cell) continue;
-          const chars = cell.getChars();
-          if (!chars) continue; // empty cell or the right half of a wide char
-          const endCol = col + Math.max(1, cell.getWidth());
-          for (let i = 0; i < chars.length; i++) {
-            colByStrIdx.push(col);
-            endColByStrIdx.push(endCol);
+        const startPosByStrIdx: { x: number; y: number }[] = [];
+        const endPosByStrIdx: { x: number; y: number }[] = [];
+        for (let rowIdx = startIdx; rowIdx <= endIdx; rowIdx++) {
+          const line = buf.getLine(rowIdx);
+          if (!line) continue;
+          const cellCount = line.length;
+          // Trim trailing empty cells on non-last wrapped rows only when they are
+          // genuinely empty; for wrapped rows, trailing cells are part of the line.
+          for (let col = 0; col < cellCount; col++) {
+            const cell = line.getCell(col);
+            if (!cell) continue;
+            const chars = cell.getChars();
+            if (!chars) continue; // empty cell or the right half of a wide char
+            const startPos = { x: col + 1, y: rowIdx + 1 };
+            const endPos = { x: col + Math.max(1, cell.getWidth()), y: rowIdx + 1 };
+            for (let i = 0; i < chars.length; i++) {
+              startPosByStrIdx.push(startPos);
+              endPosByStrIdx.push(endPos);
+            }
+            text += chars;
           }
-          text += chars;
         }
         const rangeOf = (index: number, length: number) => ({
-          start: { x: (colByStrIdx[index] ?? index) + 1, y: bufferLineNumber },
-          end: { x: endColByStrIdx[index + length - 1] ?? index + length, y: bufferLineNumber },
+          start: startPosByStrIdx[index] ?? { x: index + 1, y: bufferLineNumber },
+          end: endPosByStrIdx[index + length - 1] ?? { x: index + length, y: bufferLineNumber },
         });
+        const touchesLine = (range: { start: { y: number }; end: { y: number } }) =>
+          range.start.y <= bufferLineNumber && range.end.y >= bufferLineNumber;
         const links: ILink[] = [];
         const urlSpans: [number, number][] = [];
         let m;
@@ -1409,8 +1451,10 @@ function TierTerminalImpl({
         while ((m = LINK_RE.exec(text)) !== null) {
           const raw = trimLink(m[0]);
           urlSpans.push([m.index, m.index + raw.length]);
+          const range = rangeOf(m.index, raw.length);
+          if (!touchesLine(range)) continue;
           links.push({
-            range: rangeOf(m.index, raw.length),
+            range,
             text: raw,
             activate: () => {
               commands.openUrl(raw).catch(() => {});
@@ -1421,11 +1465,22 @@ function TierTerminalImpl({
           !urlSpans.some(([a, b]) => c.index < b && c.index + c.length > a));
         if (!candidates.length) { callback(links); return; }
         resolvePathCandidates(folderPathRef.current, candidates.map(c => c.path)).then(resolved => {
-          candidates.forEach((c, i) => {
-            const absolute = resolved[i];
-            if (!absolute) return;
+          // Prefer the longest existing path when candidates overlap (e.g. a
+          // full spaced path vs one of its space-split tokens).
+          const resolvedHits = candidates
+            .map((c, i) => ({ c, absolute: resolved[i] }))
+            .filter((item): item is { c: typeof candidates[number]; absolute: string } => !!item.absolute)
+            .sort((a, b) => b.c.length - a.c.length || a.c.index - b.c.index);
+          const acceptedSpans: [number, number][] = [];
+          for (const { c, absolute } of resolvedHits) {
+            const start = c.index;
+            const end = c.index + c.length;
+            if (acceptedSpans.some(([a, b]) => start < b && end > a)) continue;
+            acceptedSpans.push([start, end]);
+            const range = rangeOf(c.index, c.length);
+            if (!touchesLine(range)) continue;
             links.push({
-              range: rangeOf(c.index, c.length),
+              range,
               text: absolute,
               decorations: { underline: true, pointerCursor: true },
               hover: () => { hoveredPathRef.current = absolute; },
@@ -1436,7 +1491,7 @@ function TierTerminalImpl({
                 commands.openUrl(absolute).catch(() => {});
               },
             });
-          });
+          }
           callback(links);
         });
       },
