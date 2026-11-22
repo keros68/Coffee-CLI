@@ -1472,10 +1472,6 @@ body.resizing-panels .pane-resizer {
     color: var(--text-1); /* Stark white text contrasting the accent icon */
 }
 
-.brand-icon {
-    color: var(--accent);
-}
-
 .icon-btn {
     padding: 6px;
     border: none;

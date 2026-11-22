@@ -122,11 +122,10 @@ import './CenterPanel.css';
 
 export { getToolIcon };
 
-// Coffee 101 card icon — animated coffee mark (same as the brand mark
-// now portaled into the titlebar from Explorer.tsx): steam wave loops 3s, cup
-// body draws on first paint then fills. Inlined SVG so currentColor
-// follows the theme accent. Sized at 1em so it scales with the launchpad
-// card font-size like other utility cards.
+// Coffee 101 card icon — static coffee mark (cup body draws on first paint
+// then fills; steam stays still without an indefinite loop). Inlined SVG so
+// currentColor follows the theme accent. Sized at 1em so it scales with the
+// launchpad card font-size like other utility cards.
 //
 // Component is named SvgInstaller (not SvgCoffee101) because the launchpad
 // card key is `'installer'` — kept that way to preserve users' existing
@@ -151,22 +150,7 @@ const SvgInstaller = () => (
           strokeLinejoin="round"
           strokeWidth="2"
           d="M8 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M12 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M16 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4"
-        >
-          {/* Linux gate — see Explorer.tsx brand-icon for full rationale.
-              SMIL `path d` morphing inside a `<mask>` has no GPU path on
-              WebKit2GTK; on the launchpad this card sits alongside the
-              brand icon and together they pegged WebKit + coffee-cli at
-              ~1.2 cores idle on Wayland (verified live via SSH /proc
-              sampling). Static `d` on Linux = no steam drift, full glyph. */}
-          {!__IS_LINUX__ && (
-            <animate
-              attributeName="d"
-              dur="3s"
-              repeatCount="indefinite"
-              values="M8 0c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M12 0c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M16 0c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4;M8 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M12 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M16 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4"
-            />
-          )}
-        </path>
+        />
         <path d="M4 7h16v0h-16v12h16v-32h-16Z">
           <animate
             fill="freeze"

@@ -2564,20 +2564,14 @@ function TierTerminalImpl({
           className={`tier-loading-splash ${splashFading ? 'fade-out' : ''}`}
           style={{ background: solidBg }}
         >
-          {/* Animated coffee cup + label + dots — grouped as one visual unit */}
+          {/* Coffee cup + label + dots — grouped as one visual unit */}
           <div className="splash-group">
             <div className="splash-icon">
               <svg width="48" height="48" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
                 <defs>
                   <mask id={`splashMask-${sessionId}`}>
                     <path fill="none" stroke="#fff" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2"
-                      d="M8 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M12 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M16 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4">
-                      {/* Linux gate — see Explorer.tsx brand-icon for full rationale. */}
-                      {!__IS_LINUX__ && (
-                        <animate attributeName="d" dur="3s" repeatCount="indefinite"
-                          values="M8 0c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M12 0c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M16 0c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4;M8 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M12 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M16 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4"/>
-                      )}
-                    </path>
+                      d="M8 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M12 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4M16 -8c0 2 -2 2 -2 4s2 2 2 4s-2 2 -2 4s2 2 2 4" />
                     <path d="M4 7h16v0h-16v12h16v-32h-16Z">
                       <animate fill="freeze" attributeName="d" begin="1s" dur="0.6s" to="M4 2h16v5h-16v12h16v-24h-16Z"/>
                     </path>
