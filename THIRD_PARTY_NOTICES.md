@@ -38,6 +38,18 @@ Coffee CLI independently implements the messaging transport and does not
 bundle or require the OpenClaw runtime. The source-code license does not
 replace the messaging service's authorization or usage terms.
 
+## Windows console runtime
+
+Windows x64 installers include the unmodified `conpty.dll` and `OpenConsole.exe`
+from Microsoft's `Microsoft.Windows.Console.ConPTY` package, version
+1.24.261001001. The runtime is licensed under the MIT License.
+
+Copyright (c) Microsoft Corporation. All rights reserved.
+
+The full license is included beside the application as `CONPTY-LICENSE.txt`.
+Source: https://github.com/microsoft/terminal
+Package: https://www.nuget.org/packages/Microsoft.Windows.Console.ConPTY/1.24.261001001
+
 ## Service names
 
 Weixin, WeChat, and Telegram are trademarks of their respective owners. Their
